@@ -322,22 +322,27 @@ impl YomiToku {
             return Err(YomiTokuError::InputNotFound(input_path.to_path_buf()));
         }
 
-        // Get bridge script path
-        let bridge_dir = self
-            .bridge
-            .config()
-            .venv_path
-            .parent()
-            .unwrap_or(Path::new("."));
-        let bridge_script = bridge_dir.join("yomitoku_bridge.py");
-
-        if !bridge_script.exists() {
-            return Err(YomiTokuError::ExecutionFailed(format!(
-                "Bridge script not found: {}",
-                bridge_script.display()
-            )));
-        }
-
+//        // Get bridge script path
+//        let bridge_dir = self
+//            .bridge
+//            .config()
+//            .venv_path
+//            .parent()
+//            .unwrap_or(Path::new("."));
+//        let bridge_script = bridge_dir.join("yomitoku_bridge.py");
+//
+//        if !bridge_script.exists() {
+//            return Err(YomiTokuError::ExecutionFailed(format!(
+//                "Bridge script not found: {}",
+//                bridge_script.display()
+//            )));
+//        }
+// --- 書き換え箇所: 独自のパス構築を削除し、共通ロジックを呼び出す ---
+        // Get bridge script path 
+        
+        let bridge_script = crate::ai_bridge::resolve_bridge_script(AiTool::YomiToku, self.bridge.config())
+        .map_err(|e| YomiTokuError::ExecutionFailed(e.to_string()))?;
+        
         // Build command arguments for bridge script
         let mut args = vec![
             bridge_script.to_string_lossy().to_string(),
