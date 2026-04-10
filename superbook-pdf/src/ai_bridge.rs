@@ -367,6 +367,15 @@ pub fn resolve_bridge_script(tool: AiTool, config: &AiBridgeConfig) -> Result<Pa
     let script_name = tool.bridge_script_name();
     let mut searched_paths = Vec::new();
 
+    // --- 追加箇所: 0. 環境変数を最優先でチェック ---
+    if let Ok(env_dir) = std::env::var("SUPERBOOK_BRIDGE_SCRIPTS_DIR") {
+        let path = PathBuf::from(env_dir).join(script_name);
+        if path.exists() {
+            return Ok(path);
+        }
+        searched_paths.push(path);
+    }
+
     // 1. Check explicit bridge_scripts_dir
     if let Some(ref dir) = config.bridge_scripts_dir {
         let path = dir.join(script_name);
