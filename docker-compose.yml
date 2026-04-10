@@ -45,6 +45,8 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - SUPERBOOK_VENV=/app/ai_venv
+      # --- 追加箇所: ブリッジスクリプトのディレクトリを指定 ---
+      - SUPERBOOK_BRIDGE_SCRIPTS_DIR=/app
       - SUPERBOOK_BIND=0.0.0.0
       - SUPERBOOK_PORT=8080
       - SUPERBOOK_WORK_DIR=/data/work
