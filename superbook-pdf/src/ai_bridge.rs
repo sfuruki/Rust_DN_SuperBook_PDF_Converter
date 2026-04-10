@@ -92,15 +92,33 @@ pub struct AiBridgeConfig {
     pub bridge_scripts_dir: Option<PathBuf>,
 }
 
+//impl Default for AiBridgeConfig {
+//    fn default() -> Self {
+//        Self {
+//            venv_path: PathBuf::from("./ai_venv"),
+//            gpu_config: GpuConfig::default(),
+//            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+//            retry_config: RetryConfig::default(),
+//            log_level: LogLevel::Info,
+//            bridge_scripts_dir: None,
+//        }
+//    }
+//}
 impl Default for AiBridgeConfig {
     fn default() -> Self {
         Self {
-            venv_path: PathBuf::from("./ai_venv"),
+            // SUPERBOOK_VENV 環境変数があればそれを使用し、なければデフォルトの ./ai_venv を使う
+            venv_path: std::env::var("SUPERBOOK_VENV")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("./ai_venv")),
             gpu_config: GpuConfig::default(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             retry_config: RetryConfig::default(),
             log_level: LogLevel::Info,
-            bridge_scripts_dir: None,
+            // ブリッジスクリプトのディレクトリも環境変数から優先的に取得
+            bridge_scripts_dir: std::env::var("SUPERBOOK_BRIDGE_SCRIPTS_DIR")
+                .map(PathBuf::from)
+                .ok(),
         }
     }
 }
