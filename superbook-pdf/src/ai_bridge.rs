@@ -104,21 +104,26 @@ pub struct AiBridgeConfig {
 //        }
 //    }
 //}
+
 impl Default for AiBridgeConfig {
     fn default() -> Self {
+        // 環境変数 SUPERBOOK_VENV があればそれを使用し、なければデフォルトの ./ai_venv を使う
+        let venv_path = std::env::var("SUPERBOOK_VENV")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./ai_venv"));
+
+        // 環境変数 SUPERBOOK_BRIDGE_SCRIPTS_DIR からパスを取得
+        let bridge_scripts_dir = std::env::var("SUPERBOOK_BRIDGE_SCRIPTS_DIR")
+            .map(PathBuf::from)
+            .ok();
+
         Self {
-            // SUPERBOOK_VENV 環境変数があればそれを使用し、なければデフォルトの ./ai_venv を使う
-            venv_path: std::env::var("SUPERBOOK_VENV")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("./ai_venv")),
+            venv_path,
             gpu_config: GpuConfig::default(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             retry_config: RetryConfig::default(),
             log_level: LogLevel::Info,
-            // ブリッジスクリプトのディレクトリも環境変数から優先的に取得
-            bridge_scripts_dir: std::env::var("SUPERBOOK_BRIDGE_SCRIPTS_DIR")
-                .map(PathBuf::from)
-                .ok(),
+            bridge_scripts_dir,
         }
     }
 }
