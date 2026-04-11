@@ -378,7 +378,9 @@ impl MagickExtractor {
         // (especially macOS ImageMagick which requires -alpha after input file)
         let args = Self::build_magick_args(pdf_path, page_index, output_path, options);
 
-        let mut cmd = Command::new("magick");
+//        let mut cmd = Command::new("magick");
+        let cmd_name = if which::which("magick").is_ok() { "magick" } else { "convert" };
+        let mut cmd = Command::new(cmd_name);
         cmd.args(&args);
 
         let output = cmd.output()?;
@@ -467,11 +469,14 @@ impl MagickExtractor {
         }
 
         // Fallback: use ImageMagick identify
-        let output = Command::new("magick")
-            .args(["identify", "-format", "%n\n"])
-            .arg(pdf_path)
-            .output()?;
-
+//        let output = Command::new("magick")
+//            .args(["identify", "-format", "%n\n"])
+//            .arg(pdf_path)
+//            .output()?;
+        
+        let cmd_name = if which::which("magick").is_ok() { "magick" } else { "convert" };
+        let output = Command::new(cmd_name).args(["identify", "-format", "%n\n"])
+        
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(line) = stdout.lines().next() {
