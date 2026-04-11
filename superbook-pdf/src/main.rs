@@ -635,71 +635,157 @@ fn check_tool_with_version(cmd: &str, name: &str, version_args: &[&str]) {
     }
 }
 
+//fn check_python() {
+//    // Check for Python
+//    let python_cmd = if which::which("python3").is_ok() {
+//        "python3"
+//    } else if which::which("python").is_ok() {
+//        "python"
+//    } else {
+//        println!("  Python: Not found");
+//        return;
+//    };
+
+//    if let Ok(output) = std::process::Command::new(python_cmd)
+//        .args(["--version"])
+//        .output()
+//    {
+//        let version = String::from_utf8_lossy(&output.stdout);
+//        println!("  Python: {}", version.trim());
+//    }
+
+//    // Check for RealESRGAN
+//    if let Ok(output) = std::process::Command::new(python_cmd)
+//        .args(["-c", "import realesrgan; print('available')"])
+//        .output()
+//    {
+//        if output.status.success() {
+//            println!("  RealESRGAN: Available");
+//        } else {
+//            println!("  RealESRGAN: Not installed");
+//        }
+//    }
+//
+//    // Check for YomiToku
+//    if let Ok(output) = std::process::Command::new(python_cmd)
+//        .args(["-c", "import yomitoku; print('available')"])
+//        .output()
+//    {
+//        if output.status.success() {
+//            println!("  YomiToku: Available");
+//        } else {
+//            println!("  YomiToku: Not installed");
+//        }
+//    }
+//
+//    // Check bridge scripts availability
+//    println!();
+//    println!("Bridge Scripts:");
+//
+//    let venv_path = superbook_pdf::resolve_venv_path();
+//
+//    let bridge_scripts_dir = std::env::var("SUPERBOOK_BRIDGE_SCRIPTS_DIR")
+//        .map(PathBuf::from)
+//        .ok();
+//
+//    let config = superbook_pdf::AiBridgeConfig::builder()
+//        .venv_path(&venv_path)
+//        .build();
+//
+//    let config = if let Some(dir) = bridge_scripts_dir {
+//        superbook_pdf::AiBridgeConfig {
+//            bridge_scripts_dir: Some(dir),
+//            ..config
+//        }
+//    } else {
+//        config
+//    };
+//
+//    for tool in &[
+//        superbook_pdf::AiTool::RealESRGAN,
+//        superbook_pdf::AiTool::YomiToku,
+//    ] {
+//        match superbook_pdf::resolve_bridge_script(*tool, &config) {
+//            Ok(path) => {
+//                println!(
+//                    "  {} ({}): Found at {}",
+//                    tool.display_name(),
+//                    tool.bridge_script_name(),
+//                    path.display()
+//                );
+//            }
+//            Err(_) => {
+//                println!(
+//                    "  {} ({}): NOT FOUND",
+//                    tool.display_name(),
+//                    tool.bridge_script_name()
+//                );
+//                println!(
+//                    "    → Place the script in ./ai_bridge/ or set SUPERBOOK_BRIDGE_SCRIPTS_DIR"
+//                );
+//            }
+//        }
+//    }
+//}
+
 fn check_python() {
-    // Check for Python
-    let python_cmd = if which::which("python3").is_ok() {
-        "python3"
-    } else if which::which("python").is_ok() {
-        "python"
+    // 1. あなたが ai_bridge.rs で修正した Default 実装により、
+    // 環境変数 SUPERBOOK_VENV や SUPERBOOK_BRIDGE_SCRIPTS_DIR が自動的に反映されます
+    let config = superbook_pdf::AiBridgeConfig::default();
+
+    // 2. 仮想環境内の Python 実行ファイルのパスを組み立てます
+    let python_exe = if cfg!(windows) {
+        config.venv_path.join("Scripts").join("python.exe")
     } else {
-        println!("  Python: Not found");
-        return;
+        config.venv_path.join("bin").join("python")
     };
 
-    if let Ok(output) = std::process::Command::new(python_cmd)
+    // 3. 仮想環境の Python が存在するか確認
+    if !python_exe.exists() {
+        println!("  Python: NOT FOUND at {}", python_exe.display());
+        println!("    → Check SUPERBOOK_VENV or virtual environment path.");
+        return;
+    }
+
+    // Python のバージョン確認
+    if let Ok(output) = std::process::Command::new(&python_exe)
         .args(["--version"])
         .output()
     {
         let version = String::from_utf8_lossy(&output.stdout);
-        println!("  Python: {}", version.trim());
+        println!("  Python: {} ({})", version.trim(), python_exe.display());
     }
 
-    // Check for RealESRGAN
-    if let Ok(output) = std::process::Command::new(python_cmd)
+    // 4. 以降、システム Python ではなく python_exe (仮想環境) を使用してライブラリをチェック
+    // RealESRGAN のチェック
+    if let Ok(output) = std::process::Command::new(&python_exe)
         .args(["-c", "import realesrgan; print('available')"])
         .output()
     {
         if output.status.success() {
             println!("  RealESRGAN: Available");
         } else {
-            println!("  RealESRGAN: Not installed");
+            println!("  RealESRGAN: Not installed (Check venv in {})", config.venv_path.display());
         }
     }
 
-    // Check for YomiToku
-    if let Ok(output) = std::process::Command::new(python_cmd)
+    // YomiToku のチェック
+    if let Ok(output) = std::process::Command::new(&python_exe)
         .args(["-c", "import yomitoku; print('available')"])
         .output()
     {
         if output.status.success() {
             println!("  YomiToku: Available");
         } else {
-            println!("  YomiToku: Not installed");
+            println!("  YomiToku: Not installed (Check venv in {})", config.venv_path.display());
         }
     }
 
-    // Check bridge scripts availability
+    // 5. ブリッジスクリプトのチェック
+    // resolve_bridge_script は既に環境変数 SUPERBOOK_BRIDGE_SCRIPTS_DIR を
+    // 最優先で見るように修正されているため、これを利用します
     println!();
     println!("Bridge Scripts:");
-
-    let venv_path = superbook_pdf::resolve_venv_path();
-
-    let bridge_scripts_dir = std::env::var("SUPERBOOK_BRIDGE_SCRIPTS_DIR")
-        .map(PathBuf::from)
-        .ok();
-
-    let config = superbook_pdf::AiBridgeConfig::builder()
-        .venv_path(&venv_path)
-        .build();
-
-    let config = if let Some(dir) = bridge_scripts_dir {
-        superbook_pdf::AiBridgeConfig {
-            bridge_scripts_dir: Some(dir),
-            ..config
-        }
-    } else {
-        config
-    };
 
     for tool in &[
         superbook_pdf::AiTool::RealESRGAN,
