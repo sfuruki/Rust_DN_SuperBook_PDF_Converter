@@ -1657,15 +1657,31 @@ impl PdfPipeline {
                         blocks: r
                             .text_blocks
                             .iter()
-                            .map(|b| TextBlock {
-                                x: b.bbox.0 as f64,
-                                y: b.bbox.1 as f64,
-                                width: (b.bbox.2 - b.bbox.0) as f64,
-                                height: (b.bbox.3 - b.bbox.1) as f64,
-                                text: b.text.clone(),
-                                font_size: b.font_size.unwrap_or(12.0) as f64,
-                                vertical: matches!(b.direction, crate::TextDirection::Vertical),
-                            })
+//                            .map(|b| TextBlock {
+//                                x: b.bbox.0 as f64,
+//                                y: b.bbox.1 as f64,
+//                                width: (b.bbox.2 - b.bbox.0) as f64,
+//                                height: (b.bbox.3 - b.bbox.1) as f64,
+//                                text: b.text.clone(),
+//                                font_size: b.font_size.unwrap_or(12.0) as f64,
+//                                vertical: matches!(b.direction, crate::TextDirection::Vertical),
+//                            })
+                                .map(|b| {
+                                    let dpi = self.config.dpi as f64;
+                                    // PDFの座標単位「ポイント(1/72インチ)」に変換する計算式
+                                    let px_to_pt = |px: u32| (px as f64 / dpi) * 72.0;
+
+                                    TextBlock {
+                                        x: px_to_pt(b.bbox.0),
+                                        y: px_to_pt(b.bbox.1),
+                                        width: px_to_pt(b.bbox.2),  // b.bbox.2は既に「幅」なので引き算は不要 [1]
+                                        height: px_to_pt(b.bbox.3), // b.bbox.3は既に「高さ」なので引き算は不要 [1]
+                                        text: b.text.clone(),
+                                        font_size: b.font_size.unwrap_or(12.0) as f64,
+                                        vertical: matches!(b.direction, crate::TextDirection::Vertical),
+                                    }
+                                })
+                        
                             .collect(),
                     })
                 })
