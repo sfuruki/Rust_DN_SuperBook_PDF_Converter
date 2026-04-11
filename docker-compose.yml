@@ -53,7 +53,7 @@ services:
       - RUST_LOG=info
 
     volumes:
-      - ./data/input:/data/input:ro
+      - ./data/input:/data/input:rw
       - ./data/output:/data/output:rw
       - ./data/work:/data/work:rw
       - ai-cache:/root/.cache
