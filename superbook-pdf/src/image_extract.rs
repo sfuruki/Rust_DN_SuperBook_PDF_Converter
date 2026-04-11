@@ -474,8 +474,12 @@ impl MagickExtractor {
 //            .arg(pdf_path)
 //            .output()?;
         
-        let cmd_name = if which::which("magick").is_ok() { "magick" } else { "convert" };
-        let output = Command::new(cmd_name).args(["identify", "-format", "%n\n"])
+        // magick があれば "magick identify"、なければ独立した "identify" コマンドを使う
+        let output = if which::which("magick").is_ok() {
+            Command::new("magick").args(["identify", "-format", "%n\n"]).arg(pdf_path).output()?
+        } else {
+            Command::new("identify").args(["-format", "%n\n"]).arg(pdf_path).output()?
+        };
         
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
