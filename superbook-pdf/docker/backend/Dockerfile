@@ -44,6 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     ghostscript \
     qpdf \
+    imagemagick \
     # OCR
     tesseract-ocr \
     tesseract-ocr-jpn \
