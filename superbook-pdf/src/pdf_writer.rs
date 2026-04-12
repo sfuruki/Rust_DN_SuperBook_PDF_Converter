@@ -425,7 +425,8 @@ impl PrintPdfWriter {
             &images[0],
             width_mm,
             height_mm,
-            options.jpeg_quality,
+//            options.jpeg_quality,
+            options, // ← ここを「options」に変更
         )?;
 
         // Add OCR text layer for first page if available
@@ -470,7 +471,8 @@ impl PrintPdfWriter {
                 img_path,
                 w_mm,
                 h_mm,
-                options.jpeg_quality,
+//                options.jpeg_quality,
+                options, // ← ここを「options」に変更
             )?;
 
             // Add OCR text layer if available
@@ -510,7 +512,8 @@ impl PrintPdfWriter {
         img_path: &Path,
         width_mm: f32,
         height_mm: f32,
-        jpeg_quality: u8,
+        options: &PdfWriterOptions, // オプション構造体を参照で受け取る
+//        jpeg_quality: u8,
     ) -> Result<()> {
         use printpdf::{Image, ImageTransform, Mm, Px};
 
@@ -534,8 +537,10 @@ impl PrintPdfWriter {
             let rgb_img = img.to_rgb8();
             let mut jpeg_buf = Vec::new();
             let mut cursor = std::io::Cursor::new(&mut jpeg_buf);
-            let mut encoder =
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, jpeg_quality);
+//            let mut encoder =
+//                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, jpeg_quality);
+           // 以前の修正で options.dpi を使うようにしたため、ここも options 経由にする
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, options.jpeg_quality);
             encoder
                 .encode(
                     rgb_img.as_raw(),
