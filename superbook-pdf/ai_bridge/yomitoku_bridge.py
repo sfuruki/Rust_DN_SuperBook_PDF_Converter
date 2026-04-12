@@ -122,29 +122,63 @@ def process_image(
         text_blocks = []
         full_text = []
 
-        # Process paragraphs (main text blocks)
-        for para in getattr(result, "paragraphs", []):
-            # Parse box - can be [x1, y1, x2, y2] or a Box object
-            box = para.box if hasattr(para, "box") else getattr(para, "bbox", [0, 0, 0, 0])
-            if hasattr(box, "__iter__") and not isinstance(box, str):
-                box_list = list(box)
-            else:
-                box_list = [0, 0, 0, 0]
+#        # Process paragraphs (main text blocks)
+#        for para in getattr(result, "paragraphs", []):
+#            # Parse box - can be [x1, y1, x2, y2] or a Box object
+#            box = para.box if hasattr(para, "box") else getattr(para, "bbox", [0, 0, 0, 0])
+#            if hasattr(box, "__iter__") and not isinstance(box, str):
+#                box_list = list(box)
+#            else:
+#                box_list = [0, 0, 0, 0]
+#
+#            # Get text content
+#            text = para.contents if hasattr(para, "contents") else str(para)
+#            
+#            # Get direction
+#            direction = getattr(para, "direction", "horizontal")
+#            
+#            block = {
+#                "text": text,
+#                "bbox": box_list,
+#                "confidence": 1.0,  # YomiToku doesn't provide per-block confidence
+#                "direction": direction,
+#            }
+#            text_blocks.append(block)
+#            full_text.append(text)
 
-            # Get text content
-            text = para.contents if hasattr(para, "contents") else str(para)
-            
-            # Get direction
-            direction = getattr(para, "direction", "horizontal")
-            
-            block = {
-                "text": text,
-                "bbox": box_list,
-                "confidence": 1.0,  # YomiToku doesn't provide per-block confidence
-                "direction": direction,
-            }
-            text_blocks.append(block)
-            full_text.append(text)
+                # DocumentAnalyzerの全テキスト行(lines)を網羅的に取得する
+                # YomiToku 0.10+ では 'lines' が最も正確に全文を保持しています
+                lines = getattr(result, "lines", [])
+
+                # linesが直接取得できない場合は、paragraphsの中から集める
+                if not lines:
+                    for para in getattr(result, "paragraphs", []):
+                        lines.extend(getattr(para, "lines", []))
+
+                for line in lines:
+                    # ボックス座標の取得（box属性かbbox属性のいずれかを探す）
+                    box = line.box if hasattr(line, "box") else getattr(line, "bbox",[0,0,0,0] )
+
+                    # イテラブル（リスト等）であればリスト化、そうでなければデフォルト値
+                    if hasattr(box, "__iter__") and not isinstance(box, str):
+                        box_list = list(box)
+                    else:
+                        box_list = [0,0,0,0]  # ← ここを [0,0,0,0] で埋めるのが正解です
+
+                    # テキスト内容の取得 (contents属性か、オブジェクトそのものを文字列化)
+                    text = line.contents if hasattr(line, "contents") else str(line)
+
+                    # テキスト方向の取得 (vertical か horizontal か)
+                    direction = getattr(line, "direction", "horizontal")
+
+                    block = {
+                        "text": text,
+                        "bbox": box_list,
+                        "confidence": 1.0,
+                        "direction": direction,
+                    }
+                    text_blocks.append(block)
+                    full_text.append(text)
 
         # Also process individual words if no paragraphs found
         if not text_blocks:
