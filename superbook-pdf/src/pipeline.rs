@@ -1666,22 +1666,27 @@ impl PdfPipeline {
 //                                font_size: b.font_size.unwrap_or(12.0) as f64,
 //                                vertical: matches!(b.direction, crate::TextDirection::Vertical),
 //                            })
-                                .map(|b| {
-                                    let dpi = self.config.dpi as f64;
-                                    // PDFの座標単位「ポイント(1/72インチ)」に変換する計算式
-                                    let px_to_pt = |px: u32| (px as f64 / dpi) * 72.0;
 
-                                    TextBlock {
-                                        x: px_to_pt(b.bbox.0),
-                                        y: px_to_pt(b.bbox.1),
-                                        width: px_to_pt(b.bbox.2),  // b.bbox.2は既に「幅」なので引き算は不要 [1]
-                                        height: px_to_pt(b.bbox.3), // b.bbox.3は既に「高さ」なので引き算は不要 [1]
+                        .map(|b| {
+                                // 最終的な画像のピクセル高さ (Step 10で確定した値)
+                                let output_h = self.config.output_height as f64;
+                                // PDF(A4)の論理的な高さ (1/72インチ単位のポイント)
+                                let a4_height_pt = 841.89;
+
+                                // ピクセルからPDFポイントへの変換倍率
+                                let scale = a4_height_pt / output_h;
+
+                                TextBlock {
+                                        x: b.bbox.0 as f64 * scale,
+                                        y: b.bbox.1 as f64 * scale,
+                                        width: b.bbox.2 as f64 * scale,  // すでに幅なので引き算不要 [1]
+                                        height: b.bbox.3 as f64 * scale, // すでに高さなので引き算不要 [1]
                                         text: b.text.clone(),
-                                        font_size: b.font_size.unwrap_or(12.0) as f64,
+                                        // 重要: フォントサイズにもスケールを適用する
+                                        font_size: b.font_size.unwrap_or(12.0) as f64 * scale,
                                         vertical: matches!(b.direction, crate::TextDirection::Vertical),
-                                    }
-                                })
-                        
+                                }
+                        })
                             .collect(),
                     })
                 })
