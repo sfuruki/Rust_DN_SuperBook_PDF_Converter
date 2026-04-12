@@ -568,7 +568,8 @@ impl PrintPdfWriter {
         let layer_ref = doc.get_page(page).get_layer(layer);
 
         // Calculate transform to fit image to page
-        let dpi = 300.0_f32;
+//        let dpi = 300.0_f32;
+        let dpi = options.dpi as f32; 
         let img_width_pt = img_width as f32 * 72.0 / dpi;
         let img_height_pt = img_height as f32 * 72.0 / dpi;
 
