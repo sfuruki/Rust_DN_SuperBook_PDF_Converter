@@ -544,12 +544,19 @@ impl YomiToku {
                 _ => TextDirection::Horizontal,
             };
 
+                // 矩形の高さ（横書き）または幅（縦書き）からフォントサイズを推定
+            let estimated_font_size = if direction == TextDirection::Vertical {
+                bbox_arr.2 as f32 // 縦書きなら幅を基準
+            } else {
+                bbox_arr.3 as f32 // 横書きなら高さを基準
+            };
+
             text_blocks.push(TextBlock {
                 text,
                 bbox: bbox_arr,
                 confidence,
                 direction,
-                font_size: None,
+                font_size: Some(estimated_font_size), // None から変更
             });
         }
 
