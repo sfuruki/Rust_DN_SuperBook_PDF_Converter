@@ -116,12 +116,12 @@ def process_image(
             img = img_list
         result_tuple = analyzer(img)
         # YomiToku 0.10+ returns a tuple (DocumentAnalyzerSchema, None, None)
-        result = result_tuple[0] if isinstance(result_tuple, tuple) else result_tuple
-
-        # Extract text blocks from paragraphs
-        text_blocks = []
-        full_text = []
-
+#        result = result_tuple[0] if isinstance(result_tuple, tuple) else result_tuple
+#
+#        # Extract text blocks from paragraphs
+#        text_blocks = []
+#        full_text = []
+#
 #        # Process paragraphs (main text blocks)
 #        for para in getattr(result, "paragraphs", []):
 #            # Parse box - can be [x1, y1, x2, y2] or a Box object
@@ -146,40 +146,64 @@ def process_image(
 #            text_blocks.append(block)
 #            full_text.append(text)
 
-                # DocumentAnalyzerの全テキスト行(lines)を網羅的に取得する
-                # YomiToku 0.10+ では 'lines' が最も正確に全文を保持しています
-                lines = getattr(result, "lines", [])
+        # YomiToku 0.10+ は結果をタプルで返す場合があるため補正 [1]
+        result = result_tuple if isinstance(result_tuple, tuple) else result_tuple
 
-                # linesが直接取得できない場合は、paragraphsの中から集める
-                if not lines:
-                    for para in getattr(result, "paragraphs", []):
-                        lines.extend(getattr(para, "lines", []))
+        text_blocks = []
+        full_text = []
 
-                for line in lines:
-                    # ボックス座標の取得（box属性かbbox属性のいずれかを探す）
-                    box = line.box if hasattr(line, "box") else getattr(line, "bbox",[0,0,0,0] )
+        # 1. ページ全体の 'lines' 属性（行単位）を優先的に取得
+        lines = getattr(result, "lines", [])
 
-                    # イテラブル（リスト等）であればリスト化、そうでなければデフォルト値
-                    if hasattr(box, "__iter__") and not isinstance(box, str):
-                        box_list = list(box)
-                    else:
-                        box_list = [0,0,0,0]  # ← ここを [0,0,0,0] で埋めるのが正解です
+        # 2. lines が直接取れない場合は段落 (paragraphs) の中から集約する
+        if not lines:
+            for para in getattr(result, "paragraphs", []):
+                lines.extend(getattr(para, "lines", []))
 
-                    # テキスト内容の取得 (contents属性か、オブジェクトそのものを文字列化)
-                    text = line.contents if hasattr(line, "contents") else str(line)
+        # 3. 集まった全行をループで処理して text_blocks を構築
+        for line in lines:
+            # 矩形情報の取得。属性がなければ [ZERO, ZERO, ZERO, ZERO] をデフォルトにする
+            box = line.box if hasattr(line, "box") else getattr(line, "bbox", [0, 0, 0, 0])
 
-                    # テキスト方向の取得 (vertical か horizontal か)
-                    direction = getattr(line, "direction", "horizontal")
+            if hasattr(box, "__iter__") and not isinstance(box, str):
+                box_list = list(box)
+            else:
+                # 座標が不明な場合の安全なデフォルト値
+                box_list = [0, 0, 0, 0]
 
-                    block = {
-                        "text": text,
-                        "bbox": box_list,
-                        "confidence": 1.0,
-                        "direction": direction,
-                    }
-                    text_blocks.append(block)
-                    full_text.append(text)
+            # テキスト内容と文字方向を取得
+            text = line.contents if hasattr(line, "contents") else str(line)
+            direction = getattr(line, "direction", "horizontal")
 
+            text_blocks.append({
+                "text": text,
+                "bbox": box_list,
+                "confidence": 1.0, # YomiToku 0.10+ 仕様 [1]
+                "direction": direction,
+            })
+            full_text.append(text)
+
+        # 4. 行単位でもテキストが取れなかった場合、単語 (words) 単位でフォールバック
+        if not text_blocks:
+            for word in getattr(result, "words", []):
+                box = word.box if hasattr(word, "box") else getattr(word, "bbox", [0, 0, 0, 0])
+                if hasattr(box, "__iter__") and not isinstance(box, str):
+                    box_list = list(box)
+                else:
+                    box_list = [0, 0, 0, 0]
+
+                text = word.content if hasattr(word, "content") else str(word)
+                direction = getattr(word, "direction", "horizontal")
+
+                text_blocks.append({
+                    "text": text,
+                    "bbox": box_list,
+                    "confidence": 1.0,
+                    "direction": direction,
+                })
+                full_text.append(text)
+
+        elapsed = time.time() - start_time # [2]
         # Also process individual words if no paragraphs found
         if not text_blocks:
             for word in getattr(result, "words", []):
