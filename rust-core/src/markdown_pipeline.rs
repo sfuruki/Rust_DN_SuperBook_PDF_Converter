@@ -17,6 +17,7 @@ use crate::figure_detect::{FigureDetectOptions, FigureDetector, FigureRegion, Pa
 use crate::markdown_gen::{MarkdownGenError, MarkdownGenerator};
 use crate::pipeline::{PipelineConfig, PipelineError, ProgressCallback};
 use crate::yomitoku::{OcrResult, YomiTokuOptions};
+use crate::realesrgan::RealEsrganProcessor;
 
 /// Error type for Markdown pipeline
 #[derive(Debug, Error)]
@@ -206,7 +207,7 @@ impl MarkdownPipeline {
             let upscaled_dir = work_dir.join("upscaled");
             std::fs::create_dir_all(&upscaled_dir)?;
 
-            let upscaled = self.step_upscale(&upscaled_dir, &current_images, progress)?;
+            let upscaled = self.step_upscale(&upscaled_dir, &current_images, progress).await?;
             current_images = upscaled;
             progress.on_step_complete("AI超解像", "完了");
         }

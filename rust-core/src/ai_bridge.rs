@@ -932,7 +932,7 @@ impl AiBridge for SubprocessBridge {
 // --- HttpApiBridge の完全実装 ---
 #[async_trait]
 impl AiBridge for HttpApiBridge {
-    fn new(config: AiBridgeConfig) -> Result<Self, AiBridgeError> {
+    fn new(config: AiBridgeConfig) -> Result<Self> {
         Self::new(config)
     }
 
@@ -940,12 +940,12 @@ impl AiBridge for HttpApiBridge {
         &self.config
     }
 
-    async fn check_tool(&self, _tool: AiTool) -> Result<bool, AiBridgeError> {
+    async fn check_tool(&self, _tool: AiTool) -> Result<bool> {
         // コンテナが起動していれば利用可能とみなす（/health 等でチェックするように拡張可能）
         Ok(true)
     }
 
-    async fn check_gpu(&self) -> Result<GpuStats, AiBridgeError> {
+    async fn check_gpu(&self) -> Result<GpuStats> {
         // モック実装。本来は各サービスから情報を取得する [4]
         Ok(GpuStats { peak_vram_mb: 0, avg_utilization: 0.0 })
     }
@@ -956,7 +956,7 @@ impl AiBridge for HttpApiBridge {
         input_files: &[PathBuf],
         output_dir: &Path,
         tool_options: &(dyn std::any::Any + Send + Sync),
-    ) -> Result<AiTaskResult, AiBridgeError> {
+    ) -> Result<AiTaskResult> {
         let start_time = Instant::now();
         let url = self.service_urls.get(&tool)
             .ok_or_else(|| AiBridgeError::ProcessFailed("Service URL not configured".into()))?;
@@ -1014,7 +1014,7 @@ impl AiBridge for HttpApiBridge {
         })
     }
 
-    async fn cancel(&self) -> Result<(), AiBridgeError> {
+    async fn cancel(&self) -> Result<()> {
         Ok(())
     }
 }
