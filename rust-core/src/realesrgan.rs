@@ -371,7 +371,7 @@ pub struct RealEsrgan {
     bridge: Arc<dyn AiBridge>,
 }
 
-iimpl RealEsrgan {
+impl RealEsrgan {
     pub fn new(bridge: Arc<dyn AiBridge>) -> Self {
         Self { bridge }
     }

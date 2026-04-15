@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
+use futures::executor::block_on; 
 use crate::cli::ConvertArgs;
 use crate::ai_bridge::AiBridge;
 // 🚀 追加: upscale_batch メソッドを使用するためにトレイトをスコープに入れる

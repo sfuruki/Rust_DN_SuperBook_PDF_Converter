@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use async_trait::async_trait;
-use crate::ai_bridge::{AiBridge, AiBridgeError, AiTool, AiTaskResult};
+//use async_trait::async_trait;
+use crate::ai_bridge::{AiBridge, AiBridgeError, AiTool};
 
 // ============================================================
 // Constants

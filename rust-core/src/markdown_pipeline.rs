@@ -10,7 +10,7 @@ use std::time::Instant;
 use thiserror::Error;
 
 use std::sync::Arc;
-use crate::ai_bridge::{AiBridge, AiTool};
+use crate::ai_bridge::{AiBridge};
 
 use crate::cli::MarkdownArgs;
 use crate::figure_detect::{FigureDetectOptions, FigureDetector, FigureRegion, PageClassification};
