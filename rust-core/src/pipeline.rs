@@ -28,7 +28,7 @@ use std::time::Instant;
 use thiserror::Error;
 use futures::executor::block_on;
 use crate::cli::ConvertArgs;
-
+use crate::realesrgan::RealEsrganProcessor;
 use crate::ai_bridge::AiBridge;
 
 // ============================================================

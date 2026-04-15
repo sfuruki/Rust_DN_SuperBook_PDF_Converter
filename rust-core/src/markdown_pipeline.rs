@@ -271,7 +271,7 @@ impl MarkdownPipeline {
         ));
 
         // Setup YomiToku (graceful fallback if venv unavailable)
-        let venv_path = crate::resolve_venv_path();
+        //let venv_path = crate::resolve_venv_path();
         let bridge_config = crate::AiBridgeConfig::default();
         let bridge: Arc<dyn AiBridge> = if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
             let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
@@ -283,7 +283,7 @@ impl MarkdownPipeline {
             Arc::new(b)
         };
 
-        let esrgan = crate::RealEsrgan::new(bridge.clone());
+        //let esrgan = crate::RealEsrgan::new(bridge.clone());
         let yomitoku = crate::YomiToku::new(bridge);
 
         let yomitoku_options = YomiTokuOptions::builder()

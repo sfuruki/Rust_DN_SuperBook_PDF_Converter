@@ -2382,7 +2382,7 @@ impl HttpApiBridge {
     /// 新しい HttpApiBridge を生成。
     /// エラーログ [1] で指摘されている map_err 等を呼ぶために、
     /// ここで明示的に Result<Self, AiBridgeError> を返す inherent impl が必要です。
-    pub fn new(config: AiBridgeConfig) -> Result<Self, AiBridgeError> {
+    pub fn new(config: AiBridgeConfig) -> Result<Self> {
         let mut service_urls = HashMap::new();
         
         // docker-compose.yml 等の環境変数からURLを取得 [2, 3]
