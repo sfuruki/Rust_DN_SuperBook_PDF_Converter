@@ -25,7 +25,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 use std::sync::Arc;
 use thiserror::Error;
 use async_trait::async_trait;
@@ -414,7 +414,8 @@ impl RealEsrgan {
 
         // 実行結果の成否を確認
         if !result.failed_files.is_empty() {
-            let (_, error) = &result.failed_files;
+            // 🚀 修正: Vec の最初の要素  を指定してタプルを取り出します
+            let (_, error) = &result.failed_files; 
             return Err(RealEsrganError::ProcessingFailed(error.clone()));
         }
 

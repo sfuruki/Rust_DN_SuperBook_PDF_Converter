@@ -17,7 +17,7 @@ use crate::figure_detect::{FigureDetectOptions, FigureDetector, FigureRegion, Pa
 use crate::markdown_gen::{MarkdownGenError, MarkdownGenerator};
 use crate::pipeline::{PipelineConfig, PipelineError, ProgressCallback};
 use crate::yomitoku::{OcrResult, YomiTokuOptions};
-use crate::realesrgan::RealEsrganProcessor;
+//use crate::realesrgan::RealEsrganProcessor;
 
 /// Error type for Markdown pipeline
 #[derive(Debug, Error)]
