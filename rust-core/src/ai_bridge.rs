@@ -932,6 +932,7 @@ impl AiBridge for SubprocessBridge {
 // --- HttpApiBridge の完全実装 ---
 #[async_trait]
 impl AiBridge for HttpApiBridge {
+    /// トレイトの new メソッド。固有実装の new を呼び出す
     fn new(config: AiBridgeConfig) -> Result<Self> {
         Self::new(config)
     }
@@ -941,7 +942,6 @@ impl AiBridge for HttpApiBridge {
     }
 
     async fn check_tool(&self, _tool: AiTool) -> Result<bool> {
-        // コンテナが起動していれば利用可能とみなす（/health 等でチェックするように拡張可能）
         Ok(true)
     }
 
@@ -2378,14 +2378,14 @@ pub struct HttpApiBridge {
     service_urls: HashMap<AiTool, String>,
 }
 
+/// 🚀 Error E0599 対策: HttpApiBridge 自身の impl ブロックを作成
 impl HttpApiBridge {
-    /// 新しい HttpApiBridge を生成。
-    /// エラーログ [1] で指摘されている map_err 等を呼ぶために、
-    /// ここで明示的に Result<Self, AiBridgeError> を返す inherent impl が必要です。
+    /// 新しい HttpApiBridge を生成
+    /// 🚀 Error E0107 対策: 戻り値を Result<Self> に修正
     pub fn new(config: AiBridgeConfig) -> Result<Self> {
         let mut service_urls = HashMap::new();
         
-        // docker-compose.yml 等の環境変数からURLを取得 [2, 3]
+        // docker-compose.yml 等の環境変数からURLを取得
         service_urls.insert(
             AiTool::RealESRGAN, 
             std::env::var("UPSCALE_SERVICE_URL").unwrap_or_else(|_| "http://upscale-service:8000".into())
@@ -2398,7 +2398,7 @@ impl HttpApiBridge {
         Ok(Self {
             config,
             client: Client::builder()
-                .timeout(Duration::from_secs(3600)) // 巨大PDFを考慮した1時間タイムアウト [4]
+                .timeout(Duration::from_secs(3600)) // 1時間のタイムアウト
                 .build()
                 .map_err(|e| AiBridgeError::ProcessFailed(e.to_string()))?,
             service_urls,

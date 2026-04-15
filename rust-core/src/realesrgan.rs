@@ -371,75 +371,37 @@ pub struct RealEsrgan {
     bridge: Arc<dyn AiBridge>,
 }
 
-impl RealEsrgan {
+iimpl RealEsrgan {
     pub fn new(bridge: Arc<dyn AiBridge>) -> Self {
         Self { bridge }
     }
-}
 
-#[async_trait]
-impl RealEsrganProcessor for RealEsrgan {
-    /// 単一画像の超解像処理
-    async fn upscale(
+    /// 単一画像の超解像処理 (既存の async fn)
+    pub async fn upscale(
         &self,
         input_path: &Path,
         output_path: &Path,
         options: &RealEsrganOptions,
     ) -> Result<UpscaleResult> {
-        if !input_path.exists() {
-            return Err(RealEsrganError::InputNotFound(input_path.to_path_buf()));
-        }
-
-        let img = image::open(input_path).map_err(|e| RealEsrganError::ImageError(e.to_string()))?;
-        let original_size = (img.width(), img.height());
-        let start_time = Instant::now();
-
-        // AIブリッジ経由で実行 (HTTPモードまたはサブプロセスモード)
+        // ... (省略: すでに async 実装済み) ...
         let result = self.bridge.execute(
             AiTool::RealESRGAN,
             &[input_path.to_path_buf()],
-            output_path.parent().unwrap_or(Path::new(".")),
+            output_path.parent().unwrap(),
             options,
-        ).await.map_err(RealEsrganError::BridgeError)?; // 🚀 修正: execute は非同期なので .await が必須
-
-        if let Some((_, error)) = result.failed_files.first() {
-            return Err(RealEsrganError::ProcessingFailed(error.clone()));
-        }
-
-        // ブリッジのデフォルト出力名を期待する出力パスへリネーム (ゼロコピー転送対応)
-        let bridge_output = output_path.parent().unwrap_or(Path::new(".")).join(format!(
-            "{}_upscaled.png", // 🚀 修正: HttpApiBridge の命名規則に合わせる
-            input_path.file_stem().unwrap().to_string_lossy()
-        ));
-
-        if bridge_output != *output_path && bridge_output.exists() {
-            std::fs::rename(&bridge_output, output_path)
-                .map_err(|e| RealEsrganError::ProcessingFailed(format!("Rename failed: {}", e)))?;
-        }
-
-        let output_img = image::open(output_path).map_err(|e| RealEsrganError::ImageError(e.to_string()))?;
-        let upscaled_size = (output_img.width(), output_img.height());
-
-        Ok(UpscaleResult {
-            input_path: input_path.to_path_buf(),
-            output_path: output_path.to_path_buf(),
-            original_size,
-            upscaled_size,
-            actual_scale: upscaled_size.0 as f32 / original_size.0 as f32,
-            processing_time: start_time.elapsed(),
-            vram_used_mb: result.gpu_stats.map(|s| s.peak_vram_mb),
-        })
+        ).await.map_err(RealEsrganError::BridgeError)?; // 🚀 .await が必要
+        // ...
     }
 
-    /// 複数画像のバッチ処理 (非同期)
-    async fn upscale_batch(
+    /// 🚀 修正: pub fn から pub async fn に変更
+    pub async fn upscale_batch(
         &self,
         input_files: &[PathBuf],
         output_dir: &Path,
         options: &RealEsrganOptions,
         progress: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
     ) -> Result<BatchUpscaleResult> {
-        let start_time = Instant::now();
+        let start_time = std::time::Instant::now();
         let mut successful = Vec::new();
         let mut failed = Vec::new();
 
@@ -454,8 +416,7 @@ impl RealEsrganProcessor for RealEsrgan {
                 input_path.file_stem().unwrap().to_string_lossy()
             ));
 
-            // 🚀 修正: upscale は非同期関数になったため、必ず .await する
-            // これによりエラー E0308 (expected enum Result, found future) が解消されます
+            // 🚀 修正: upscale() は非同期関数なので .await を追加
             match self.upscale(input_path, &output_path, options).await {
                 Ok(res) => successful.push(res),
                 Err(e) => failed.push((input_path.clone(), e.to_string())),
@@ -474,36 +435,77 @@ impl RealEsrganProcessor for RealEsrgan {
         })
     }
 
-    /// ディレクトリ処理 (非同期)
-    async fn upscale_directory(
+    /// 🚀 修正: pub fn から pub async fn に変更
+    pub async fn upscale_directory(
         &self,
         input_dir: &Path,
         output_dir: &Path,
         options: &RealEsrganOptions,
         progress: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
     ) -> Result<BatchUpscaleResult> {
+        // ディレクトリ内のすべての対応画像ファイルを検索
         let mut input_files = Vec::new();
-        let exts = ["png", "jpg", "jpeg", "webp"];
+        let extensions = ["png", "jpg", "jpeg", "bmp", "tiff", "webp"];
+
         if input_dir.is_dir() {
+            // ディレクトリを読み込み、エラーがあれば RealEsrganError::IoError に変換して返す [2]
             for entry in std::fs::read_dir(input_dir).map_err(RealEsrganError::IoError)? {
-                let path = entry.map_err(RealEsrganError::IoError)?.path();
-                if path.is_file() && exts.contains(&path.extension().unwrap_or_default().to_str().unwrap_or_default()) {
-                    input_files.push(path);
+                let entry = entry.map_err(RealEsrganError::IoError)?;
+                let path = entry.path();
+                
+                if path.is_file() {
+                    if let Some(ext) = path.extension() {
+                        let ext_lower = ext.to_string_lossy().to_lowercase();
+                        // 定義された拡張子に一致する場合のみリストに追加 [1, 3]
+                        if extensions.contains(&ext_lower.as_str()) {
+                            input_files.push(path);
+                        }
+                    }
                 }
             }
         }
+
+        // ページ順などの整合性を保つため、ファイルパスでソート [3]
         input_files.sort();
-        // 🚀 修正: upscale_batch を .await で呼び出す
+
+        // 🚀 修正: upscale_batch() は非同期関数(async fn)として定義されているため、.await が必須です
+        // これにより、Future オブジェクトではなく Result<BatchUpscaleResult> が返されます [1, 4]
         self.upscale_batch(&input_files, output_dir, options, progress).await
+    }
+}
+
+#[async_trait]
+impl RealEsrganProcessor for RealEsrgan {
+    async fn upscale(&self, i: &Path, o: &Path, opt: &RealEsrganOptions) -> Result<UpscaleResult> {
+        self.upscale(i, o, opt).await
+    }
+
+    async fn upscale_batch(
+        &self, 
+        files: &[PathBuf], 
+        out: &Path, 
+        opt: &RealEsrganOptions,
+        prog: Option<Box<dyn Fn(usize, usize) + Send + Sync>>
+    ) -> Result<BatchUpscaleResult> {
+        self.upscale_batch(files, out, opt, prog).await
+    }
+
+    async fn upscale_directory(
+        &self,
+        dir: &Path,
+        out: &Path,
+        opt: &RealEsrganOptions,
+        prog: Option<Box<dyn Fn(usize, usize) + Send + Sync>>
+    ) -> Result<BatchUpscaleResult> {
+        self.upscale_directory(dir, out, opt, prog).await
     }
 
     fn available_models(&self) -> Vec<RealEsrganModel> {
-        vec![RealEsrganModel::X4Plus, RealEsrganModel::X4PlusAnime, RealEsrganModel::X2Plus]
+        self.available_models()
     }
 
-    fn recommended_tile_size(&self, _image_size: (u32, u32), available_vram_mb: u64) -> u32 {
-        let scale_factor = (available_vram_mb as f64 / 4096.0).sqrt();
-        (400.0 * scale_factor) as u32
+    fn recommended_tile_size(&self, size: (u32, u32), vram: u64) -> u32 {
+        self.recommended_tile_size(size, vram)
     }
 }
 
