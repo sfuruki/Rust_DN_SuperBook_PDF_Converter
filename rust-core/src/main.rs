@@ -41,6 +41,13 @@ use superbook_pdf::{ServeArgs, ServerConfig, WebServer};
 
 fn main() {
     let cli = Cli::parse();
+    
+    // 起動情報の表示
+    if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
+        println!("🚀 Mode: Microservice (HTTP API)");
+    } else {
+        println!("💻 Mode: Local (Subprocess)");
+    }
 
     let result = match cli.command {
         Commands::Convert(args) => run_convert(&args),

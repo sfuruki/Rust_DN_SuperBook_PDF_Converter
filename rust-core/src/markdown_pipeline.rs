@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use thiserror::Error;
 
+use std::sync::Arc;
+use crate::ai_bridge::AiBridge;
+
 use crate::cli::MarkdownArgs;
 use crate::figure_detect::{FigureDetectOptions, FigureDetector, FigureRegion, PageClassification};
 use crate::markdown_gen::{MarkdownGenError, MarkdownGenerator};
@@ -268,19 +271,20 @@ impl MarkdownPipeline {
 
         // Setup YomiToku (graceful fallback if venv unavailable)
         let venv_path = crate::resolve_venv_path();
-        let bridge_config = crate::AiBridgeConfig::builder()
-            .venv_path(venv_path.clone())
-            .build();
-        let yomitoku = match crate::SubprocessBridge::new(bridge_config) {
-            Ok(bridge) => Some(crate::YomiToku::new(bridge)),
-            Err(e) => {
-                progress.on_warning(&format!(
-                    "YomiToku利用不可 (venvが見つからないか初期化失敗): {} — 図検出のみで続行します",
-                    e
-                ));
-                None
-            }
+        let bridge_config = crate::AiBridgeConfig::default();
+        let bridge: Arc<dyn AiBridge> = if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
+        // 明示的に HttpApiBridge::new() の Result を処理する
+            let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
+                .map_err(|e| MarkdownPipelineError::OcrError(e.to_string()))?;
+            Arc::new(b)
+        } else {
+            let b = crate::SubprocessBridge::new(bridge_config)
+                .map_err(|e| MarkdownPipelineError::OcrError(e.to_string()))?;
+            Arc::new(b)
         };
+
+        let esrgan = crate::RealEsrgan::new(bridge.clone());
+        let yomitoku = crate::YomiToku::new(bridge);
 
         let yomitoku_options = YomiTokuOptions::builder()
             .use_gpu(self.config.gpu)
@@ -300,16 +304,11 @@ impl MarkdownPipeline {
             progress.on_step_progress(page_idx + 1, page_count);
 
             // Run OCR (or create empty result if YomiToku unavailable)
-            let ocr_result = if let Some(ref yt) = yomitoku {
-                // 修正ポイント2: .ocr(...) の後に .await を追加する
-                match yt.ocr(image_path, &yomitoku_options) {
+            let ocr_result = if self.config.ocr {
+                match yomitoku.ocr(image_path, &yomitoku_options).await { // .await を追加
                     Ok(result) => result,
                     Err(e) => {
-                        progress.on_debug(&format!(
-                            "ページ {} OCRエラー: {} (空テキストとして続行)",
-                            page_idx + 1,
-                            e
-                        ));
+                        progress.on_debug(&format!("ページ {} OCRエラー: {}", page_idx + 1, e));
                         Self::empty_ocr_result(image_path)
                     }
                 }

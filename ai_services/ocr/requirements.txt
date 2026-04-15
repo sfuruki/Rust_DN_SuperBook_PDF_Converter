@@ -1,0 +1,7 @@
+# OCR Service Dependencies
+torch>=2.0.0
+yomitoku>=0.6.0
+opencv-python>=4.8.0
+numpy<2.0.0
+fastapi
+uvicorn

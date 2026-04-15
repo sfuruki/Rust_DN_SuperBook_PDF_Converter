@@ -26,12 +26,12 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc; // 🚀 Arc を追加（DIに必須）
 use std::time::Duration;
 use thiserror::Error;
 
-use crate::ai_bridge::{AiBridgeError, AiTool, SubprocessBridge};
-
-use crate::ai_bridge::AiBridge;
+// crate::ai_bridge から必要なものをまとめてインポート
+use crate::ai_bridge::{AiBridge, AiBridgeError, AiTool, SubprocessBridge};
 
 // ============================================================
 // Constants
@@ -303,7 +303,7 @@ pub struct BatchOcrResult {
 
 /// YomiToku OCR processor
 pub struct YomiToku {
-    bridge: SubprocessBridge,
+    bridge: Arc<dyn AiBridge>,
 }
 
 impl YomiToku {
@@ -318,7 +318,7 @@ impl YomiToku {
     }
 
     /// Perform OCR on a single image
-    pub fn ocr(&self, input_path: &Path, options: &YomiTokuOptions) -> Result<OcrResult> {
+    pub async fn ocr(&self, input_path: &Path, options: &YomiTokuOptions) -> Result<OcrResult> {
         let start_time = std::time::Instant::now();
 
         if !input_path.exists() {
@@ -374,15 +374,12 @@ impl YomiToku {
         std::fs::create_dir_all(&temp_output_dir)
             .map_err(|e| YomiTokuError::ExecutionFailed(format!("Failed to create temp dir: {}", e)))?;
 
-        let result = self
-            .bridge
-            .execute(
-                AiTool::YomiToku,
-                &[input_path.to_path_buf()],
-                &temp_output_dir,
-                &args,
-            )
-            .map_err(|e| YomiTokuError::ExecutionFailed(e.to_string()))?;
+        let result = self.bridge.execute(
+            AiTool::YomiToku,
+            &[input_path.to_path_buf()],
+            &temp_output_dir,
+            options, // オプションを渡す。HttpApiBridgeの実装側でURLを構築する。
+        ).await.map_err(|e| YomiTokuError::ExecutionFailed(e.to_string()))?;
 
         // Get the output from the first processed file
         let output = if let Some(processed_file) = result.processed_files.first() {

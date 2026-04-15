@@ -29,6 +29,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
+use std::sync::Arc;
+use crate::ai_bridge::AiBridge;
+
 use async_trait::async_trait;
 // ============================================================
 // Constants
@@ -370,17 +373,17 @@ pub trait RealEsrganProcessor {
 
 /// RealESRGAN implementation
 pub struct RealEsrgan {
-    bridge: SubprocessBridge,
+    bridge: Arc<dyn AiBridge>,
 }
 
 impl RealEsrgan {
     /// Create a new RealESRGAN processor
-    pub fn new(bridge: SubprocessBridge) -> Self {
+    pub fn new(bridge: Arc<dyn AiBridge>) -> Self {
         Self { bridge }
     }
 
     /// Upscale single image
-    pub fn upscale(
+    pub async fn upscale(
         &self,
         input_path: &Path,
         output_path: &Path,
@@ -410,10 +413,10 @@ impl RealEsrgan {
             .execute(
                 AiTool::RealESRGAN,
                 &[input_path.to_path_buf()],
-                output_dir,
+                output_path.parent().unwrap(),
                 options,
             )
-            .map_err(RealEsrganError::BridgeError)?;
+            .await.map_err(RealEsrganError::BridgeError)?; // .await を追加
 
         if !result.failed_files.is_empty() {
             let (_, error) = &result.failed_files[0];

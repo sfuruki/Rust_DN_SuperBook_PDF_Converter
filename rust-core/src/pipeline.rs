@@ -29,6 +29,8 @@ use thiserror::Error;
 
 use crate::cli::ConvertArgs;
 
+use crate::ai_bridge::AiBridge;
+
 // ============================================================
 // Memory Management Utilities (Phase 3 optimization)
 // ============================================================
@@ -1228,17 +1230,14 @@ impl PdfPipeline {
         // Try to initialize RealESRGAN
         let venv_path = crate::resolve_venv_path();
 
-        let bridge_config = crate::AiBridgeConfig::builder()
-            .venv_path(venv_path)
-            .build();
+        let bridge_config = crate::AiBridgeConfig::default();
 
-        let bridge = match crate::SubprocessBridge::new(bridge_config) {
-            Ok(b) => b,
-            Err(e) => {
-                progress.on_warning(&format!("RealESRGAN not available: {}", e));
-                return Ok(images.to_vec());
-            }
+        let bridge: Arc<dyn AiBridge> = if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
+            Arc::new(crate::ai_bridge::HttpApiBridge::new(bridge_config).unwrap())
+        } else {
+            Arc::new(crate::SubprocessBridge::new(bridge_config).unwrap())
         };
+
 
         let esrgan = crate::RealEsrgan::new(bridge);
         let mut options = crate::RealEsrganOptions::builder().scale(2);
@@ -1247,21 +1246,16 @@ impl PdfPipeline {
         }
         let options = options.build();
 
-        match esrgan.upscale_batch(images, &upscaled_dir, &options, None) {
-            Ok(result) => {
-                progress
-                    .on_step_complete("Upscaling", &format!("{} images", result.successful.len()));
-                Ok(result
-                    .successful
-                    .iter()
-                    .map(|r| r.output_path.clone())
-                    .collect())
-            }
-            Err(e) => {
-                progress.on_warning(&format!("Upscaling failed: {}", e));
-                Ok(images.to_vec())
-            }
+        match futures::executor::block_on(esrgan.upscale_batch(images, &upscaled_dir, &options, None)) {
+        Ok(result) => {
+            progress.on_step_complete("超解像", &format!("{}画像", result.successful.len()));
+            Ok(result.successful.iter().map(|r| r.output_path.clone()).collect())
         }
+        Err(e) => {
+            progress.on_warning(&format!("超解像失敗: {}", e));
+            Ok(images.to_vec())
+        }
+    }
     }
 
     /// Step 6: Internal resolution normalization (skip blank pages)
@@ -1600,16 +1594,11 @@ impl PdfPipeline {
 
         let venv_path = crate::resolve_venv_path();
 
-        let bridge_config = crate::AiBridgeConfig::builder()
-            .venv_path(venv_path)
-            .build();
-
-        let bridge = match crate::SubprocessBridge::new(bridge_config) {
-            Ok(b) => b,
-            Err(e) => {
-                progress.on_warning(&format!("YomiToku not available: {}", e));
-                return Ok(vec![]);
-            }
+        let bridge_config = crate::AiBridgeConfig::default();
+        let bridge: Arc<dyn AiBridge> = if std::env::var("OCR_SERVICE_URL").is_ok() {
+            Arc::new(crate::ai_bridge::HttpApiBridge::new(bridge_config).unwrap())
+        } else {
+             Arc::new(crate::SubprocessBridge::new(bridge_config).unwrap())
         };
 
         let yomitoku = crate::YomiToku::new(bridge);
@@ -1621,7 +1610,8 @@ impl PdfPipeline {
 
         let mut results = Vec::new();
         for img_path in images {
-            match yomitoku.ocr(img_path, &ocr_opts) {
+            // ocr() を .await して実行 (PdfPipelineが同期のため block_on を検討)
+            match futures::executor::block_on(yomitoku.ocr(img_path, &ocr_opts)) {
                 Ok(result) => results.push(Some(result)),
                 Err(_) => results.push(None),
             }
