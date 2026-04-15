@@ -1,0 +1,2778 @@
+//! PDF Writer module
+//!
+//! Provides functionality to create PDF files from images.
+//!
+//! # Features
+//!
+//! - Create PDFs from image files (PNG, JPEG, etc.)
+//! - Configurable DPI and JPEG quality
+//! - Optional OCR text layer for searchable PDFs
+//! - Metadata embedding
+//! - Multiple page size modes
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use superbook_pdf::{PdfWriterOptions, PrintPdfWriter};
+//!
+//! let options = PdfWriterOptions::builder()
+//!     .dpi(300)
+//!     .jpeg_quality(90)
+//!     .build();
+//!
+//! let images = vec!["page1.png".into(), "page2.png".into()];
+//! PrintPdfWriter::create_from_images(&images, std::path::Path::new("output.pdf"), &options).unwrap();
+//! ```
+
+use crate::pdf_reader::PdfMetadata;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+// ============================================================
+// Constants
+// ============================================================
+
+/// Conversion factor: 1 point = 0.352_778 mm (1/72 inch ≈ 25.4/72)
+const POINTS_TO_MM: f32 = 0.352_778;
+
+/// Millimeters per inch
+const MM_PER_INCH: f32 = 25.4;
+
+/// Points per inch (PDF standard)
+const POINTS_PER_INCH: f32 = 72.0;
+
+/// Default DPI for standard quality
+const DEFAULT_DPI: u32 = 300;
+
+/// High quality DPI for archival output
+const HIGH_QUALITY_DPI: u32 = 600;
+
+/// Compact DPI for smaller file sizes
+const COMPACT_DPI: u32 = 150;
+
+/// Default JPEG quality
+const DEFAULT_JPEG_QUALITY: u8 = 90;
+
+/// High quality JPEG setting
+const HIGH_QUALITY_JPEG: u8 = 95;
+
+/// Compact JPEG quality for smaller files
+const COMPACT_JPEG_QUALITY: u8 = 75;
+
+/// Minimum JPEG quality
+const MIN_JPEG_QUALITY: u8 = 1;
+
+/// Maximum JPEG quality
+const MAX_JPEG_QUALITY: u8 = 100;
+
+/// PDF writing error types
+#[derive(Debug, Error)]
+pub enum PdfWriterError {
+    #[error("No images provided")]
+    NoImages,
+
+    #[error("Image not found: {0}")]
+    ImageNotFound(PathBuf),
+
+    #[error("Unsupported image format: {0}")]
+    UnsupportedFormat(String),
+
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("PDF generation error: {0}")]
+    GenerationError(String),
+}
+
+pub type Result<T> = std::result::Result<T, PdfWriterError>;
+
+/// PDF viewer preferences for enhanced reading experience
+#[derive(Debug, Clone, Default)]
+pub struct PdfViewerHints {
+    /// Page number shift: physical page N displays as logical page (N - shift)
+    /// Set to Some(shift) to embed /PageLabels in the PDF catalog.
+    pub page_number_shift: Option<i32>,
+    /// Whether the document should use right-to-left page progression.
+    /// When true, sets /ViewerPreferences /Direction /R2L.
+    /// This applies to Japanese books (both vertical and horizontal text)
+    /// and other RTL-reading-order documents.
+    pub is_rtl: bool,
+    /// First logical page number (default: 1).
+    /// Used together with page_number_shift to set /PageLabels.
+    pub first_logical_page: i32,
+}
+
+/// PDF generation options
+#[derive(Debug, Clone)]
+pub struct PdfWriterOptions {
+    /// Output DPI
+    pub dpi: u32,
+    /// JPEG quality (1-100)
+    pub jpeg_quality: u8,
+    /// Image compression method
+    pub compression: ImageCompression,
+    /// Page size unification mode
+    pub page_size_mode: PageSizeMode,
+    /// PDF metadata
+    pub metadata: Option<PdfMetadata>,
+    /// OCR text layer
+    pub ocr_layer: Option<OcrLayer>,
+    /// CJK font path for OCR text (None = auto-detect system font)
+    pub cjk_font_path: Option<PathBuf>,
+    /// Viewer hints (page labels, spread layout, reading direction)
+    pub viewer_hints: Option<PdfViewerHints>,
+}
+
+impl Default for PdfWriterOptions {
+    fn default() -> Self {
+        Self {
+            dpi: DEFAULT_DPI,
+            jpeg_quality: DEFAULT_JPEG_QUALITY,
+            compression: ImageCompression::Jpeg,
+            page_size_mode: PageSizeMode::FirstPage,
+            metadata: None,
+            ocr_layer: None,
+            cjk_font_path: None,
+            viewer_hints: None,
+        }
+    }
+}
+
+impl PdfWriterOptions {
+    /// Create a new options builder
+    pub fn builder() -> PdfWriterOptionsBuilder {
+        PdfWriterOptionsBuilder::default()
+    }
+
+    /// Create options optimized for high quality output
+    pub fn high_quality() -> Self {
+        Self {
+            dpi: HIGH_QUALITY_DPI,
+            jpeg_quality: HIGH_QUALITY_JPEG,
+            compression: ImageCompression::JpegLossless,
+            cjk_font_path: None,
+            ..Default::default()
+        }
+    }
+
+    /// Create options optimized for smaller file size
+    pub fn compact() -> Self {
+        Self {
+            dpi: COMPACT_DPI,
+            jpeg_quality: COMPACT_JPEG_QUALITY,
+            compression: ImageCompression::Jpeg,
+            cjk_font_path: None,
+            ..Default::default()
+        }
+    }
+}
+
+/// Builder for PdfWriterOptions
+#[derive(Debug, Default)]
+pub struct PdfWriterOptionsBuilder {
+    options: PdfWriterOptions,
+}
+
+impl PdfWriterOptionsBuilder {
+    /// Set output DPI
+    #[must_use]
+    pub fn dpi(mut self, dpi: u32) -> Self {
+        self.options.dpi = dpi;
+        self
+    }
+
+    /// Set JPEG quality (1-100)
+    #[must_use]
+    pub fn jpeg_quality(mut self, quality: u8) -> Self {
+        self.options.jpeg_quality = quality.clamp(MIN_JPEG_QUALITY, MAX_JPEG_QUALITY);
+        self
+    }
+
+    /// Set compression method
+    #[must_use]
+    pub fn compression(mut self, compression: ImageCompression) -> Self {
+        self.options.compression = compression;
+        self
+    }
+
+    /// Set page size mode
+    #[must_use]
+    pub fn page_size_mode(mut self, mode: PageSizeMode) -> Self {
+        self.options.page_size_mode = mode;
+        self
+    }
+
+    /// Set metadata
+    #[must_use]
+    pub fn metadata(mut self, metadata: PdfMetadata) -> Self {
+        self.options.metadata = Some(metadata);
+        self
+    }
+
+    /// Set OCR layer
+    #[must_use]
+    pub fn ocr_layer(mut self, layer: OcrLayer) -> Self {
+        self.options.ocr_layer = Some(layer);
+        self
+    }
+
+    /// Set CJK font path for OCR text
+    #[must_use]
+    pub fn cjk_font_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.options.cjk_font_path = Some(path.into());
+        self
+    }
+
+    /// Set viewer hints (page labels, reading direction, spread layout)
+    #[must_use]
+    pub fn viewer_hints(mut self, hints: PdfViewerHints) -> Self {
+        self.options.viewer_hints = Some(hints);
+        self
+    }
+
+    /// Build the options
+    #[must_use]
+    pub fn build(self) -> PdfWriterOptions {
+        self.options
+    }
+}
+
+/// Image compression methods
+#[derive(Debug, Clone, Copy, Default)]
+pub enum ImageCompression {
+    #[default]
+    Jpeg,
+    JpegLossless,
+    Flate,
+    None,
+}
+
+/// Page size unification modes
+#[derive(Debug, Clone, Copy, Default)]
+pub enum PageSizeMode {
+    /// Match first page size
+    #[default]
+    FirstPage,
+    /// Use maximum dimensions
+    MaxSize,
+    /// Fixed size in points
+    Fixed { width_pt: f64, height_pt: f64 },
+    /// Keep original size for each page
+    Original,
+}
+
+/// OCR text layer
+#[derive(Debug, Clone)]
+pub struct OcrLayer {
+    pub pages: Vec<OcrPageText>,
+}
+
+/// OCR text for a single page
+#[derive(Debug, Clone)]
+pub struct OcrPageText {
+    pub page_index: usize,
+    pub blocks: Vec<TextBlock>,
+}
+
+/// Text block with position
+#[derive(Debug, Clone)]
+pub struct TextBlock {
+    /// X coordinate in points (left-bottom origin)
+    pub x: f64,
+    /// Y coordinate in points
+    pub y: f64,
+    /// Width in points
+    pub width: f64,
+    /// Height in points
+    pub height: f64,
+    /// Text content
+    pub text: String,
+    /// Font size in points
+    pub font_size: f64,
+    /// Vertical text flag
+    pub vertical: bool,
+}
+
+/// PDF Writer trait
+pub trait PdfWriter {
+    /// Create PDF from images
+    fn create_from_images(
+        images: &[PathBuf],
+        output: &Path,
+        options: &PdfWriterOptions,
+    ) -> Result<()>;
+
+    /// Create PDF using streaming (memory efficient)
+    fn create_streaming(
+        images: impl Iterator<Item = PathBuf>,
+        output: &Path,
+        options: &PdfWriterOptions,
+    ) -> Result<()>;
+}
+
+/// Known system font paths for CJK support
+const CJK_FONT_SEARCH_PATHS: &[&str] = &[
+    // macOS
+    "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB W3.otf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    // Linux (Noto Sans CJK)
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    // Linux (alternative locations)
+    "/usr/share/fonts/OTF/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
+    // Docker / Debian fonts-noto-cjk package
+    "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJKjp-Regular.otf",
+];
+
+/// Find a CJK font on the system
+///
+/// Search order:
+/// 1. Custom path from `PdfWriterOptions.cjk_font_path`
+/// 2. System font paths (OS-specific)
+/// 3. None (will fall back to Helvetica)
+pub fn find_cjk_font(custom_path: Option<&Path>) -> Option<PathBuf> {
+    // 1. Check custom path
+    if let Some(path) = custom_path {
+        if path.exists() {
+            return Some(path.to_path_buf());
+        }
+        eprintln!("Warning: Specified CJK font not found: {}", path.display());
+    }
+
+    // 2. Search system font paths
+    for path_str in CJK_FONT_SEARCH_PATHS {
+        let path = Path::new(path_str);
+        if path.exists() {
+            return Some(path.to_path_buf());
+        }
+    }
+
+    // 3. Not found
+    None
+}
+
+/// printpdf-based PDF writer implementation
+pub struct PrintPdfWriter;
+
+impl PrintPdfWriter {
+    /// Create a new PDF writer
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Create PDF from images
+    pub fn create_from_images(
+        images: &[PathBuf],
+        output: &Path,
+        options: &PdfWriterOptions,
+    ) -> Result<()> {
+        if images.is_empty() {
+            return Err(PdfWriterError::NoImages);
+        }
+
+        // Validate all images exist
+        for img_path in images {
+            if !img_path.exists() {
+                return Err(PdfWriterError::ImageNotFound(img_path.clone()));
+            }
+        }
+
+        // Load first image to determine initial page size
+        let first_img =
+            image::open(&images[0]).map_err(|e| PdfWriterError::GenerationError(e.to_string()))?;
+
+        let (width_px, height_px) = (first_img.width(), first_img.height());
+        let dpi = options.dpi as f64;
+
+        // Convert pixels to millimeters for printpdf
+        let width_mm = (width_px as f32 / dpi as f32) * MM_PER_INCH;
+        let height_mm = (height_px as f32 / dpi as f32) * MM_PER_INCH;
+
+        // Create PDF document
+        let title = options
+            .metadata
+            .as_ref()
+            .and_then(|m| m.title.as_deref())
+            .unwrap_or("Document");
+
+        let (doc, page1, layer1) = printpdf::PdfDocument::new(
+            title,
+            printpdf::Mm(width_mm),
+            printpdf::Mm(height_mm),
+            "Layer 1",
+        );
+
+        // Load font once before the page loop (only if OCR layer is present)
+        let font = if options.ocr_layer.is_some() {
+            Some(Self::load_font(&doc, options.cjk_font_path.as_deref())?)
+        } else {
+            None
+        };
+
+        // Add first image to first page
+        Self::add_image_to_layer(
+            &doc,
+            page1,
+            layer1,
+            &first_img,
+            &images[0],
+            width_mm,
+            height_mm,
+//            options.jpeg_quality,
+            options, // ← ここを「options」に変更
+        )?;
+
+        // Add OCR text layer for first page if available
+        if let Some(ref ocr_layer) = options.ocr_layer {
+            if let Some(page_text) = ocr_layer.pages.iter().find(|p| p.page_index == 0) {
+                let text_layer = doc.get_page(page1).add_layer("OCR Text");
+                Self::add_ocr_text(text_layer, page_text, height_mm, font.as_ref().unwrap())?;
+            }
+        }
+
+        // Add remaining images
+        for (img_idx, img_path) in images.iter().enumerate().skip(1) {
+            let img = image::open(img_path)
+                .map_err(|e| PdfWriterError::GenerationError(e.to_string()))?;
+
+            let dpi_f32 = options.dpi as f32;
+            let (w_px, h_px) = match options.page_size_mode {
+                PageSizeMode::FirstPage => (width_px, height_px),
+                PageSizeMode::Original => (img.width(), img.height()),
+                PageSizeMode::MaxSize => (width_px.max(img.width()), height_px.max(img.height())),
+                PageSizeMode::Fixed {
+                    width_pt,
+                    height_pt,
+                } => {
+                    // Convert points to pixels at specified DPI
+                    let w = (width_pt as f32 * dpi_f32 / POINTS_PER_INCH) as u32;
+                    let h = (height_pt as f32 * dpi_f32 / POINTS_PER_INCH) as u32;
+                    (w, h)
+                }
+            };
+
+            let w_mm = (w_px as f32 / dpi_f32) * MM_PER_INCH;
+            let h_mm = (h_px as f32 / dpi_f32) * MM_PER_INCH;
+
+            let (page, layer) = doc.add_page(printpdf::Mm(w_mm), printpdf::Mm(h_mm), "Layer 1");
+
+            Self::add_image_to_layer(
+                &doc,
+                page,
+                layer,
+                &img,
+                img_path,
+                w_mm,
+                h_mm,
+//                options.jpeg_quality,
+                options, // ← ここを「options」に変更
+            )?;
+
+            // Add OCR text layer if available
+            if let Some(ref ocr_layer) = options.ocr_layer {
+                if let Some(page_text) = ocr_layer.pages.iter().find(|p| p.page_index == img_idx) {
+                    let text_layer = doc.get_page(page).add_layer("OCR Text");
+                    Self::add_ocr_text(text_layer, page_text, h_mm, font.as_ref().unwrap())?;
+                }
+            }
+        }
+
+        // Save PDF
+        let file = File::create(output)?;
+        let mut writer = BufWriter::new(file);
+        doc.save(&mut writer)
+            .map_err(|e| PdfWriterError::GenerationError(e.to_string()))?;
+
+        // Post-process: embed viewer hints (page labels, reading direction, spread layout)
+        if let Some(ref hints) = options.viewer_hints {
+            Self::apply_viewer_hints(output, hints, images.len())?;
+        }
+
+        Ok(())
+    }
+
+    /// Add image to a PDF layer
+    ///
+    /// If the input is a JPEG file, the raw JPEG bytes are passed through directly
+    /// (DCT filter) to avoid re-encoding overhead. For non-JPEG inputs (PNG, etc.),
+    /// the image is JPEG-encoded at the specified quality before embedding.
+    #[allow(clippy::too_many_arguments)]
+    fn add_image_to_layer(
+        doc: &printpdf::PdfDocumentReference,
+        page: printpdf::PdfPageIndex,
+        layer: printpdf::PdfLayerIndex,
+        img: &image::DynamicImage,
+        img_path: &Path,
+        width_mm: f32,
+        height_mm: f32,
+        options: &PdfWriterOptions, // オプション構造体を参照で受け取る
+//        jpeg_quality: u8,
+    ) -> Result<()> {
+        use printpdf::{Image, ImageTransform, Mm, Px};
+
+        let (img_width, img_height) = (img.width(), img.height());
+
+        // Check if input is JPEG for pass-through
+        let is_jpeg = img_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| {
+                let lower = e.to_ascii_lowercase();
+                lower == "jpg" || lower == "jpeg"
+            })
+            .unwrap_or(false);
+
+        let image_data_bytes = if is_jpeg {
+            // JPEG pass-through: read raw bytes directly, no re-encoding
+            std::fs::read(img_path)?
+        } else {
+            // Non-JPEG (PNG, etc.): encode to JPEG
+            let rgb_img = img.to_rgb8();
+            let mut jpeg_buf = Vec::new();
+            let mut cursor = std::io::Cursor::new(&mut jpeg_buf);
+//            let mut encoder =
+//                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, jpeg_quality);
+           // 以前の修正で options.dpi を使うようにしたため、ここも options 経由にする
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, options.jpeg_quality);
+            encoder
+                .encode(
+                    rgb_img.as_raw(),
+                    img_width,
+                    img_height,
+                    image::ExtendedColorType::Rgb8,
+                )
+                .map_err(|e| {
+                    PdfWriterError::GenerationError(format!("JPEG encode error: {}", e))
+                })?;
+            jpeg_buf
+        };
+
+        // Create printpdf Image with DCT (JPEG) filter
+        let image_data = printpdf::ImageXObject {
+            width: Px(img_width as usize),
+            height: Px(img_height as usize),
+            color_space: printpdf::ColorSpace::Rgb,
+            bits_per_component: printpdf::ColorBits::Bit8,
+            interpolate: true,
+            image_data: image_data_bytes,
+            image_filter: Some(printpdf::ImageFilter::DCT),
+            clipping_bbox: None,
+            smask: None,
+        };
+
+        let image = Image::from(image_data);
+
+        // Get layer reference
+        let layer_ref = doc.get_page(page).get_layer(layer);
+
+        // Calculate transform to fit image to page
+//        let dpi = 300.0_f32;
+        let dpi = options.dpi as f32; 
+        let img_width_pt = img_width as f32 * 72.0 / dpi;
+        let img_height_pt = img_height as f32 * 72.0 / dpi;
+
+        // Target size in points (mm to points: mm * 72 / 25.4)
+        let width_pt = width_mm * 72.0 / MM_PER_INCH;
+        let height_pt = height_mm * 72.0 / MM_PER_INCH;
+
+        // Scale factors to fit image to page
+        let scale_x = width_pt / img_width_pt;
+        let scale_y = height_pt / img_height_pt;
+
+        let transform = ImageTransform {
+            translate_x: Some(Mm(0.0)),
+            translate_y: Some(Mm(0.0)),
+            scale_x: Some(scale_x),
+            scale_y: Some(scale_y),
+            rotate: None,
+            dpi: Some(dpi),
+        };
+
+        image.add_to_layer(layer_ref, transform);
+
+        Ok(())
+    }
+
+    /// Load a font for OCR text embedding.
+    ///
+    /// Tries CJK font first (custom path or system fonts), falls back to Helvetica.
+    /// This should be called once before the page loop, not per-page.
+    fn load_font(
+        doc: &printpdf::PdfDocumentReference,
+        cjk_font_path: Option<&Path>,
+    ) -> Result<printpdf::IndirectFontRef> {
+        if let Some(font_path) = find_cjk_font(cjk_font_path) {
+            let font_file = File::open(&font_path).map_err(|e| {
+                PdfWriterError::GenerationError(format!(
+                    "Failed to open CJK font {}: {}",
+                    font_path.display(),
+                    e
+                ))
+            })?;
+            let reader = std::io::BufReader::new(font_file);
+            doc.add_external_font(reader).map_err(|e| {
+                PdfWriterError::GenerationError(format!(
+                    "Failed to load CJK font {}: {}",
+                    font_path.display(),
+                    e
+                ))
+            })
+        } else {
+            eprintln!(
+                "Warning: No CJK font found. Japanese/Chinese/Korean OCR text will not be embedded correctly. \
+                 Install fonts-noto-cjk (Linux) or specify --cjk-font-path."
+            );
+            doc.add_builtin_font(printpdf::BuiltinFont::Helvetica)
+                .map_err(|e| PdfWriterError::GenerationError(e.to_string()))
+        }
+    }
+
+    /// Add OCR text layer to a PDF page
+    ///
+    /// The text is rendered as invisible (searchable) text over the image.
+    /// The font must be loaded once via `load_font()` and shared across all pages.
+    fn add_ocr_text(
+        layer: printpdf::PdfLayerReference,
+        page_text: &OcrPageText,
+        page_height_mm: f32,
+        font: &printpdf::IndirectFontRef,
+    ) -> Result<()> {
+        use printpdf::Mm;
+
+        for block in &page_text.blocks {
+            if block.text.is_empty() {
+                continue;
+            }
+
+            // Convert points to mm
+            let x_mm = block.x as f32 * POINTS_TO_MM;
+            // PDF coordinate system has origin at bottom-left, so flip y
+            let y_mm = page_height_mm
+                - (block.y as f32 * POINTS_TO_MM)
+                - (block.height as f32 * POINTS_TO_MM);
+            let font_size_pt = block.font_size as f32;
+
+            // Set text rendering mode to invisible (mode 3)
+            // This makes text searchable but not visible
+            layer.set_text_rendering_mode(printpdf::TextRenderingMode::Invisible);
+
+            layer.use_text(&block.text, font_size_pt, Mm(x_mm), Mm(y_mm), font);
+        }
+
+        Ok(())
+    }
+
+    /// Post-process PDF to embed PageLabels, PageLayout, and ViewerPreferences via lopdf.
+    fn apply_viewer_hints(
+        pdf_path: &Path,
+        hints: &PdfViewerHints,
+        page_count: usize,
+    ) -> Result<()> {
+        use lopdf::{dictionary, Document, Object};
+
+        let mut doc = Document::load(pdf_path)
+            .map_err(|e| PdfWriterError::GenerationError(format!("lopdf load: {}", e)))?;
+
+        // 1. PageLabels: embed logical page numbering
+        if let Some(shift) = hints.page_number_shift {
+            if shift != 0 && page_count > 0 {
+                let label_start_physical = shift.max(0) as usize;
+
+                let mut nums: Vec<Object> = Vec::new();
+
+                if label_start_physical > 0 && label_start_physical < page_count {
+                    // Front matter: roman numerals (i, ii, iii...)
+                    nums.push(Object::Integer(0));
+                    nums.push(Object::Dictionary(dictionary! {
+                        "S" => Object::Name(b"r".to_vec()),
+                    }));
+
+                    // Main content: Arabic numerals starting at 1
+                    nums.push(Object::Integer(label_start_physical as i64));
+                    nums.push(Object::Dictionary(dictionary! {
+                        "S" => Object::Name(b"D".to_vec()),
+                        "St" => Object::Integer(hints.first_logical_page as i64),
+                    }));
+                } else {
+                    // Simple case: all pages offset by shift
+                    let start_num = (1 - shift).max(1) as i64;
+                    nums.push(Object::Integer(0));
+                    nums.push(Object::Dictionary(dictionary! {
+                        "S" => Object::Name(b"D".to_vec()),
+                        "St" => Object::Integer(start_num),
+                    }));
+                }
+
+                let page_labels = dictionary! {
+                    "Nums" => Object::Array(nums),
+                };
+
+                let labels_ref = doc.add_object(Object::Dictionary(page_labels));
+                let catalog = doc
+                    .catalog_mut()
+                    .map_err(|e| PdfWriterError::GenerationError(format!("catalog: {}", e)))?;
+                catalog.set("PageLabels", Object::Reference(labels_ref));
+            }
+        }
+
+        // 2. PageLayout: set spread viewing mode for book reading
+        //    TwoPageRight = first page is displayed alone on the right (like a book cover)
+        if hints.page_number_shift.is_some() || hints.is_rtl {
+            let catalog = doc
+                .catalog_mut()
+                .map_err(|e| PdfWriterError::GenerationError(format!("catalog: {}", e)))?;
+            catalog.set("PageLayout", Object::Name(b"TwoPageRight".to_vec()));
+        }
+
+        // 3. ViewerPreferences: set reading direction
+        if hints.is_rtl {
+            // R2L = right-to-left page progression (for Japanese books and RTL languages)
+            let viewer_prefs = {
+                let catalog = doc
+                    .catalog()
+                    .map_err(|e| PdfWriterError::GenerationError(format!("catalog: {}", e)))?;
+                if let Ok(existing) = catalog.get(b"ViewerPreferences") {
+                    match existing.clone() {
+                        Object::Dictionary(mut d) => {
+                            d.set("Direction", Object::Name(b"R2L".to_vec()));
+                            d
+                        }
+                        _ => dictionary! {
+                            "Direction" => Object::Name(b"R2L".to_vec()),
+                        },
+                    }
+                } else {
+                    dictionary! {
+                        "Direction" => Object::Name(b"R2L".to_vec()),
+                    }
+                }
+            };
+
+            let prefs_ref = doc.add_object(Object::Dictionary(viewer_prefs));
+            let catalog = doc
+                .catalog_mut()
+                .map_err(|e| PdfWriterError::GenerationError(format!("catalog: {}", e)))?;
+            catalog.set("ViewerPreferences", Object::Reference(prefs_ref));
+        }
+
+        // Save the modified PDF
+        doc.save(pdf_path)
+            .map_err(|e| PdfWriterError::GenerationError(format!("lopdf save: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Create PDF from image iterator (streaming mode for memory efficiency)
+    pub fn create_streaming(
+        images: impl Iterator<Item = PathBuf>,
+        output: &Path,
+        options: &PdfWriterOptions,
+    ) -> Result<()> {
+        let images_vec: Vec<PathBuf> = images.collect();
+        Self::create_from_images(&images_vec, output, options)
+    }
+}
+
+impl Default for PrintPdfWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // TC-PDW-003: 空の画像リストエラー
+    #[test]
+    fn test_empty_images_error() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("output.pdf");
+
+        let result = PrintPdfWriter::create_from_images(&[], &output, &PdfWriterOptions::default());
+
+        assert!(matches!(result, Err(PdfWriterError::NoImages)));
+    }
+
+    // TC-PDW-004: 存在しない画像エラー
+    #[test]
+    fn test_nonexistent_image_error() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("output.pdf");
+
+        let images = vec![PathBuf::from("/nonexistent/image.jpg")];
+
+        let result =
+            PrintPdfWriter::create_from_images(&images, &output, &PdfWriterOptions::default());
+
+        assert!(matches!(result, Err(PdfWriterError::ImageNotFound(_))));
+    }
+
+    #[test]
+    fn test_default_options() {
+        let opts = PdfWriterOptions::default();
+
+        assert_eq!(opts.dpi, 300);
+        assert_eq!(opts.jpeg_quality, 90);
+        assert!(matches!(opts.compression, ImageCompression::Jpeg));
+        assert!(matches!(opts.page_size_mode, PageSizeMode::FirstPage));
+        assert!(opts.metadata.is_none());
+        assert!(opts.ocr_layer.is_none());
+    }
+
+    // Image fixture tests
+
+    // TC-PDW-001: 単一画像からPDF生成
+    #[test]
+    fn test_single_image_to_pdf() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("output.pdf");
+
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+        let options = PdfWriterOptions::default();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+
+        assert!(output.exists());
+    }
+
+    // TC-PDW-002: 複数画像からPDF生成
+    #[test]
+    fn test_multiple_images_to_pdf() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("output.pdf");
+
+        let images: Vec<_> = (1..=10)
+            .map(|i| PathBuf::from(format!("tests/fixtures/book_page_{}.png", i)))
+            .collect();
+        let options = PdfWriterOptions::default();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+
+        let doc = lopdf::Document::load(&output).unwrap();
+        assert_eq!(doc.get_pages().len(), 10);
+    }
+
+    // TC-PDW-005: メタデータ設定
+    #[test]
+    fn test_metadata_setting() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("output.pdf");
+
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+        let options = PdfWriterOptions {
+            metadata: Some(PdfMetadata {
+                title: Some("Test Document".to_string()),
+                author: Some("Test Author".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+
+        // Metadata verification would require reading back the PDF
+        assert!(output.exists());
+    }
+
+    // TC-PDW-006: JPEG品質設定
+    #[test]
+    fn test_jpeg_quality() {
+        let temp_dir = tempdir().unwrap();
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+
+        // High quality
+        let output_high = temp_dir.path().join("high.pdf");
+        let options_high = PdfWriterOptions {
+            jpeg_quality: 95,
+            ..Default::default()
+        };
+        PrintPdfWriter::create_from_images(&images, &output_high, &options_high).unwrap();
+
+        // Low quality
+        let output_low = temp_dir.path().join("low.pdf");
+        let options_low = PdfWriterOptions {
+            jpeg_quality: 50,
+            ..Default::default()
+        };
+        PrintPdfWriter::create_from_images(&images, &output_low, &options_low).unwrap();
+
+        // Both should exist (size comparison may not work with placeholder implementation)
+        assert!(output_high.exists());
+        assert!(output_low.exists());
+    }
+
+    #[test]
+    fn test_builder_pattern() {
+        let options = PdfWriterOptions::builder()
+            .dpi(600)
+            .jpeg_quality(95)
+            .compression(ImageCompression::JpegLossless)
+            .page_size_mode(PageSizeMode::MaxSize)
+            .build();
+
+        assert_eq!(options.dpi, 600);
+        assert_eq!(options.jpeg_quality, 95);
+        assert!(matches!(
+            options.compression,
+            ImageCompression::JpegLossless
+        ));
+        assert!(matches!(options.page_size_mode, PageSizeMode::MaxSize));
+    }
+
+    #[test]
+    fn test_builder_quality_clamping() {
+        // Quality should be clamped to 1-100
+        let options = PdfWriterOptions::builder().jpeg_quality(150).build();
+        assert_eq!(options.jpeg_quality, 100);
+
+        let options = PdfWriterOptions::builder().jpeg_quality(0).build();
+        assert_eq!(options.jpeg_quality, 1);
+    }
+
+    #[test]
+    fn test_high_quality_preset() {
+        let options = PdfWriterOptions::high_quality();
+
+        assert_eq!(options.dpi, 600);
+        assert_eq!(options.jpeg_quality, 95);
+        assert!(matches!(
+            options.compression,
+            ImageCompression::JpegLossless
+        ));
+    }
+
+    #[test]
+    fn test_compact_preset() {
+        let options = PdfWriterOptions::compact();
+
+        assert_eq!(options.dpi, 150);
+        assert_eq!(options.jpeg_quality, 75);
+        assert!(matches!(options.compression, ImageCompression::Jpeg));
+    }
+
+    // TC-PDW-007: Streaming generation (memory efficient)
+    #[test]
+    fn test_streaming_generation() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("output.pdf");
+
+        let images = (1..=5).map(|i| PathBuf::from(format!("tests/fixtures/book_page_{}.png", i)));
+        let options = PdfWriterOptions::default();
+
+        PrintPdfWriter::create_streaming(images, &output, &options).unwrap();
+
+        assert!(output.exists());
+        let doc = lopdf::Document::load(&output).unwrap();
+        assert_eq!(doc.get_pages().len(), 5);
+    }
+
+    // TC-PDW-008: OCR layer embedding
+    #[test]
+    fn test_ocr_layer_option() {
+        let ocr_layer = OcrLayer {
+            pages: vec![OcrPageText {
+                page_index: 0,
+                blocks: vec![TextBlock {
+                    x: 100.0,
+                    y: 100.0,
+                    width: 200.0,
+                    height: 20.0,
+                    text: "Test OCR Text".to_string(),
+                    font_size: 12.0,
+                    vertical: false,
+                }],
+            }],
+        };
+
+        let options = PdfWriterOptions::builder()
+            .ocr_layer(ocr_layer.clone())
+            .build();
+
+        assert!(options.ocr_layer.is_some());
+        assert_eq!(options.ocr_layer.unwrap().pages.len(), 1);
+    }
+
+    // TC-PDW-009: Vertical OCR support
+    #[test]
+    fn test_vertical_ocr_text() {
+        let vertical_block = TextBlock {
+            x: 50.0,
+            y: 100.0,
+            width: 20.0,
+            height: 200.0,
+            text: "縦書きテスト".to_string(),
+            font_size: 14.0,
+            vertical: true,
+        };
+
+        assert!(vertical_block.vertical);
+        assert_eq!(vertical_block.text, "縦書きテスト");
+    }
+
+    // TC-PDW-010: Different size images processing
+    #[test]
+    fn test_different_size_images() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("output.pdf");
+
+        // Use different sized images from fixtures
+        let images = vec![
+            PathBuf::from("tests/fixtures/book_page_1.png"),
+            PathBuf::from("tests/fixtures/sample_page.png"),
+        ];
+
+        // Test with PageSizeMode::Original to preserve different sizes
+        let options = PdfWriterOptions::builder()
+            .page_size_mode(PageSizeMode::Original)
+            .build();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+
+        assert!(output.exists());
+        let doc = lopdf::Document::load(&output).unwrap();
+        assert_eq!(doc.get_pages().len(), 2);
+    }
+
+    // Additional structure tests
+
+    #[test]
+    fn test_all_compression_types() {
+        let compressions = vec![
+            ImageCompression::Jpeg,
+            ImageCompression::JpegLossless,
+            ImageCompression::Flate,
+            ImageCompression::None,
+        ];
+
+        for comp in compressions {
+            let options = PdfWriterOptions::builder().compression(comp).build();
+            // Verify compression is set
+            match (comp, options.compression) {
+                (ImageCompression::Jpeg, ImageCompression::Jpeg) => {}
+                (ImageCompression::JpegLossless, ImageCompression::JpegLossless) => {}
+                (ImageCompression::Flate, ImageCompression::Flate) => {}
+                (ImageCompression::None, ImageCompression::None) => {}
+                _ => panic!("Compression mismatch"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_all_page_size_modes() {
+        // Test FirstPage mode
+        let options = PdfWriterOptions::builder()
+            .page_size_mode(PageSizeMode::FirstPage)
+            .build();
+        assert!(matches!(options.page_size_mode, PageSizeMode::FirstPage));
+
+        // Test MaxSize mode
+        let options = PdfWriterOptions::builder()
+            .page_size_mode(PageSizeMode::MaxSize)
+            .build();
+        assert!(matches!(options.page_size_mode, PageSizeMode::MaxSize));
+
+        // Test Original mode
+        let options = PdfWriterOptions::builder()
+            .page_size_mode(PageSizeMode::Original)
+            .build();
+        assert!(matches!(options.page_size_mode, PageSizeMode::Original));
+
+        // Test Fixed mode
+        let options = PdfWriterOptions::builder()
+            .page_size_mode(PageSizeMode::Fixed {
+                width_pt: 612.0,
+                height_pt: 792.0,
+            })
+            .build();
+        if let PageSizeMode::Fixed {
+            width_pt,
+            height_pt,
+        } = options.page_size_mode
+        {
+            assert_eq!(width_pt, 612.0);
+            assert_eq!(height_pt, 792.0);
+        } else {
+            panic!("Expected Fixed page size mode");
+        }
+    }
+
+    #[test]
+    fn test_text_block_construction() {
+        let block = TextBlock {
+            x: 100.0,
+            y: 200.0,
+            width: 300.0,
+            height: 50.0,
+            text: "Sample text".to_string(),
+            font_size: 12.0,
+            vertical: false,
+        };
+
+        assert_eq!(block.x, 100.0);
+        assert_eq!(block.y, 200.0);
+        assert_eq!(block.width, 300.0);
+        assert_eq!(block.height, 50.0);
+        assert_eq!(block.text, "Sample text");
+        assert_eq!(block.font_size, 12.0);
+        assert!(!block.vertical);
+    }
+
+    #[test]
+    fn test_ocr_page_text_construction() {
+        let page_text = OcrPageText {
+            page_index: 5,
+            blocks: vec![TextBlock {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 20.0,
+                text: "Test".to_string(),
+                font_size: 10.0,
+                vertical: false,
+            }],
+        };
+
+        assert_eq!(page_text.page_index, 5);
+        assert_eq!(page_text.blocks.len(), 1);
+    }
+
+    #[test]
+    fn test_ocr_layer_construction() {
+        let layer = OcrLayer {
+            pages: vec![
+                OcrPageText {
+                    page_index: 0,
+                    blocks: vec![],
+                },
+                OcrPageText {
+                    page_index: 1,
+                    blocks: vec![],
+                },
+            ],
+        };
+
+        assert_eq!(layer.pages.len(), 2);
+    }
+
+    #[test]
+    fn test_error_types() {
+        // Test all error variants can be constructed
+        let _err1 = PdfWriterError::NoImages;
+        let _err2 = PdfWriterError::ImageNotFound(PathBuf::from("/test/path"));
+        let _err3 = PdfWriterError::UnsupportedFormat("test".to_string());
+        let _err4 = PdfWriterError::GenerationError("gen error".to_string());
+        let _err5: PdfWriterError =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "test").into();
+    }
+
+    #[test]
+    fn test_print_pdf_writer_default() {
+        let writer = PrintPdfWriter;
+        // Just verify it can be constructed
+        let _ = writer;
+    }
+
+    #[test]
+    fn test_builder_with_metadata() {
+        let metadata = PdfMetadata {
+            title: Some("Test Doc".to_string()),
+            author: Some("Test Author".to_string()),
+            ..Default::default()
+        };
+
+        let options = PdfWriterOptions::builder().metadata(metadata).build();
+
+        assert!(options.metadata.is_some());
+        let meta = options.metadata.unwrap();
+        assert_eq!(meta.title, Some("Test Doc".to_string()));
+        assert_eq!(meta.author, Some("Test Author".to_string()));
+    }
+
+    #[test]
+    fn test_dpi_setting() {
+        let options = PdfWriterOptions::builder().dpi(600).build();
+        assert_eq!(options.dpi, 600);
+
+        let options = PdfWriterOptions::builder().dpi(150).build();
+        assert_eq!(options.dpi, 150);
+    }
+
+    // TC-PDW-008: OCRレイヤー埋め込みテスト拡張
+    #[test]
+    fn test_ocr_layer_with_multiple_blocks() {
+        let layer = OcrLayer {
+            pages: vec![OcrPageText {
+                page_index: 0,
+                blocks: vec![
+                    TextBlock {
+                        x: 100.0,
+                        y: 700.0,
+                        width: 400.0,
+                        height: 20.0,
+                        text: "First line".to_string(),
+                        font_size: 12.0,
+                        vertical: false,
+                    },
+                    TextBlock {
+                        x: 100.0,
+                        y: 680.0,
+                        width: 300.0,
+                        height: 20.0,
+                        text: "Second line".to_string(),
+                        font_size: 12.0,
+                        vertical: false,
+                    },
+                ],
+            }],
+        };
+
+        let options = PdfWriterOptions::builder().ocr_layer(layer).build();
+
+        assert!(options.ocr_layer.is_some());
+        let ocr = options.ocr_layer.unwrap();
+        assert_eq!(ocr.pages.len(), 1);
+        assert_eq!(ocr.pages[0].blocks.len(), 2);
+    }
+
+    // TC-PDW-009: 縦書きOCR対応テスト
+    #[test]
+    fn test_vertical_text_block() {
+        let vertical_block = TextBlock {
+            x: 500.0,
+            y: 100.0,
+            width: 20.0,
+            height: 600.0,
+            text: "縦書きテスト".to_string(),
+            font_size: 12.0,
+            vertical: true,
+        };
+
+        assert!(vertical_block.vertical);
+        assert!(vertical_block.height > vertical_block.width);
+
+        let horizontal_block = TextBlock {
+            x: 100.0,
+            y: 700.0,
+            width: 400.0,
+            height: 20.0,
+            text: "横書きテスト".to_string(),
+            font_size: 12.0,
+            vertical: false,
+        };
+
+        assert!(!horizontal_block.vertical);
+        assert!(horizontal_block.width > horizontal_block.height);
+    }
+
+    // TC-PDW-010: 異なるサイズの画像処理テスト
+    #[test]
+    fn test_page_size_modes() {
+        let modes = [
+            PageSizeMode::FirstPage,
+            PageSizeMode::MaxSize,
+            PageSizeMode::Original,
+            PageSizeMode::Fixed {
+                width_pt: 595.0,
+                height_pt: 842.0,
+            },
+        ];
+
+        for mode in modes {
+            let options = PdfWriterOptions::builder().page_size_mode(mode).build();
+            // Verify mode is set correctly
+            match (mode, options.page_size_mode) {
+                (PageSizeMode::FirstPage, PageSizeMode::FirstPage) => {}
+                (PageSizeMode::MaxSize, PageSizeMode::MaxSize) => {}
+                (PageSizeMode::Original, PageSizeMode::Original) => {}
+                (
+                    PageSizeMode::Fixed {
+                        width_pt: w1,
+                        height_pt: h1,
+                    },
+                    PageSizeMode::Fixed {
+                        width_pt: w2,
+                        height_pt: h2,
+                    },
+                ) => {
+                    assert_eq!(w1, w2);
+                    assert_eq!(h1, h2);
+                }
+                _ => panic!("Page size mode mismatch"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_compression_types_in_builder() {
+        let compressions = [
+            ImageCompression::Jpeg,
+            ImageCompression::JpegLossless,
+            ImageCompression::Flate,
+            ImageCompression::None,
+        ];
+
+        for compression in compressions {
+            let options = PdfWriterOptions::builder().compression(compression).build();
+            match (compression, options.compression) {
+                (ImageCompression::Jpeg, ImageCompression::Jpeg) => {}
+                (ImageCompression::JpegLossless, ImageCompression::JpegLossless) => {}
+                (ImageCompression::Flate, ImageCompression::Flate) => {}
+                (ImageCompression::None, ImageCompression::None) => {}
+                _ => panic!("Compression type mismatch"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_metadata_all_fields() {
+        let metadata = PdfMetadata {
+            title: Some("Test Title".to_string()),
+            author: Some("Test Author".to_string()),
+            subject: Some("Test Subject".to_string()),
+            keywords: Some("keyword1, keyword2".to_string()),
+            creator: Some("Test Creator".to_string()),
+            producer: Some("superbook-pdf".to_string()),
+            creation_date: Some("2024-01-01".to_string()),
+            modification_date: Some("2024-01-02".to_string()),
+        };
+
+        assert_eq!(metadata.title, Some("Test Title".to_string()));
+        assert_eq!(metadata.author, Some("Test Author".to_string()));
+        assert_eq!(metadata.subject, Some("Test Subject".to_string()));
+        assert!(metadata.keywords.is_some());
+        assert!(metadata.keywords.as_ref().unwrap().contains("keyword1"));
+        assert_eq!(metadata.creator, Some("Test Creator".to_string()));
+        assert_eq!(metadata.producer, Some("superbook-pdf".to_string()));
+        assert!(metadata.creation_date.is_some());
+        assert!(metadata.modification_date.is_some());
+    }
+
+    #[test]
+    fn test_error_display_messages() {
+        let err = PdfWriterError::NoImages;
+        assert!(!err.to_string().is_empty());
+
+        let err = PdfWriterError::ImageNotFound(PathBuf::from("/path/to/image.png"));
+        assert!(err.to_string().contains("/path/to/image.png"));
+
+        let err = PdfWriterError::UnsupportedFormat("BMP".to_string());
+        assert!(err.to_string().contains("BMP"));
+
+        let err = PdfWriterError::GenerationError("PDF creation failed".to_string());
+        assert!(err.to_string().contains("PDF creation failed"));
+    }
+
+    #[test]
+    fn test_builder_chaining() {
+        let options = PdfWriterOptions::builder()
+            .dpi(300)
+            .jpeg_quality(90)
+            .compression(ImageCompression::Jpeg)
+            .page_size_mode(PageSizeMode::FirstPage)
+            .build();
+
+        assert_eq!(options.dpi, 300);
+        assert_eq!(options.jpeg_quality, 90);
+        assert!(matches!(options.compression, ImageCompression::Jpeg));
+        assert!(matches!(options.page_size_mode, PageSizeMode::FirstPage));
+    }
+
+    // Additional comprehensive tests
+
+    #[test]
+    fn test_dpi_boundary_values() {
+        // Low DPI
+        let options_low = PdfWriterOptions::builder().dpi(72).build();
+        assert_eq!(options_low.dpi, 72);
+
+        // Standard DPI
+        let options_std = PdfWriterOptions::builder().dpi(300).build();
+        assert_eq!(options_std.dpi, 300);
+
+        // High DPI
+        let options_high = PdfWriterOptions::builder().dpi(1200).build();
+        assert_eq!(options_high.dpi, 1200);
+
+        // Very high DPI
+        let options_very_high = PdfWriterOptions::builder().dpi(2400).build();
+        assert_eq!(options_very_high.dpi, 2400);
+    }
+
+    #[test]
+    fn test_jpeg_quality_boundary_values() {
+        // Minimum (clamped to 1)
+        let options_min = PdfWriterOptions::builder().jpeg_quality(1).build();
+        assert_eq!(options_min.jpeg_quality, 1);
+
+        // Maximum
+        let options_max = PdfWriterOptions::builder().jpeg_quality(100).build();
+        assert_eq!(options_max.jpeg_quality, 100);
+
+        // Typical values
+        for quality in [25, 50, 75, 85, 95] {
+            let opts = PdfWriterOptions::builder().jpeg_quality(quality).build();
+            assert_eq!(opts.jpeg_quality, quality);
+        }
+    }
+
+    #[test]
+    fn test_text_block_various_dimensions() {
+        // Small block
+        let small = TextBlock {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 5.0,
+            text: "X".to_string(),
+            font_size: 8.0,
+            vertical: false,
+        };
+        assert!(small.width > 0.0);
+        assert!(small.height > 0.0);
+
+        // Full page width block
+        let full_width = TextBlock {
+            x: 0.0,
+            y: 700.0,
+            width: 595.0, // A4 width in points
+            height: 14.0,
+            text: "Full width text line".to_string(),
+            font_size: 12.0,
+            vertical: false,
+        };
+        assert_eq!(full_width.width, 595.0);
+
+        // Tall vertical block
+        let tall_vertical = TextBlock {
+            x: 500.0,
+            y: 50.0,
+            width: 14.0,
+            height: 700.0,
+            text: "縦書き長文".to_string(),
+            font_size: 12.0,
+            vertical: true,
+        };
+        assert!(tall_vertical.height > tall_vertical.width);
+        assert!(tall_vertical.vertical);
+    }
+
+    #[test]
+    fn test_ocr_layer_many_pages() {
+        let pages: Vec<OcrPageText> = (0..100)
+            .map(|i| OcrPageText {
+                page_index: i,
+                blocks: vec![TextBlock {
+                    x: 100.0,
+                    y: 700.0,
+                    width: 400.0,
+                    height: 20.0,
+                    text: format!("Page {} text", i + 1),
+                    font_size: 12.0,
+                    vertical: false,
+                }],
+            })
+            .collect();
+
+        let layer = OcrLayer { pages };
+        assert_eq!(layer.pages.len(), 100);
+        assert_eq!(layer.pages[0].page_index, 0);
+        assert_eq!(layer.pages[99].page_index, 99);
+    }
+
+    #[test]
+    fn test_ocr_page_text_many_blocks() {
+        let blocks: Vec<TextBlock> = (0..50)
+            .map(|i| TextBlock {
+                x: 50.0,
+                y: 800.0 - (i as f64 * 15.0),
+                width: 500.0,
+                height: 12.0,
+                text: format!("Line {}", i + 1),
+                font_size: 10.0,
+                vertical: false,
+            })
+            .collect();
+
+        let page = OcrPageText {
+            page_index: 0,
+            blocks,
+        };
+
+        assert_eq!(page.blocks.len(), 50);
+    }
+
+    #[test]
+    fn test_error_from_io_conversion() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let pdf_err: PdfWriterError = io_err.into();
+        let msg = pdf_err.to_string();
+        assert!(msg.contains("access denied") || msg.contains("IO error"));
+    }
+
+    #[test]
+    fn test_options_clone() {
+        let original = PdfWriterOptions::builder()
+            .dpi(400)
+            .jpeg_quality(88)
+            .compression(ImageCompression::Flate)
+            .build();
+
+        let cloned = original.clone();
+        assert_eq!(cloned.dpi, original.dpi);
+        assert_eq!(cloned.jpeg_quality, original.jpeg_quality);
+    }
+
+    #[test]
+    fn test_text_block_clone() {
+        let original = TextBlock {
+            x: 100.0,
+            y: 200.0,
+            width: 300.0,
+            height: 50.0,
+            text: "Clone test".to_string(),
+            font_size: 14.0,
+            vertical: true,
+        };
+
+        let cloned = original.clone();
+        assert_eq!(cloned.x, original.x);
+        assert_eq!(cloned.y, original.y);
+        assert_eq!(cloned.text, original.text);
+        assert_eq!(cloned.vertical, original.vertical);
+    }
+
+    #[test]
+    fn test_ocr_layer_clone() {
+        let original = OcrLayer {
+            pages: vec![OcrPageText {
+                page_index: 0,
+                blocks: vec![],
+            }],
+        };
+
+        let cloned = original.clone();
+        assert_eq!(cloned.pages.len(), original.pages.len());
+    }
+
+    #[test]
+    fn test_options_debug_impl() {
+        let options = PdfWriterOptions::builder()
+            .dpi(300)
+            .jpeg_quality(90)
+            .build();
+
+        let debug_str = format!("{:?}", options);
+        assert!(debug_str.contains("PdfWriterOptions"));
+        assert!(debug_str.contains("300"));
+    }
+
+    #[test]
+    fn test_compression_debug_impl() {
+        let comp = ImageCompression::Flate;
+        let debug_str = format!("{:?}", comp);
+        assert!(debug_str.contains("Flate"));
+    }
+
+    #[test]
+    fn test_page_size_mode_debug_impl() {
+        let mode = PageSizeMode::Fixed {
+            width_pt: 595.0,
+            height_pt: 842.0,
+        };
+        let debug_str = format!("{:?}", mode);
+        assert!(debug_str.contains("Fixed"));
+        assert!(debug_str.contains("595"));
+    }
+
+    #[test]
+    fn test_compression_default() {
+        let comp: ImageCompression = Default::default();
+        assert!(matches!(comp, ImageCompression::Jpeg));
+    }
+
+    #[test]
+    fn test_page_size_mode_default() {
+        let mode: PageSizeMode = Default::default();
+        assert!(matches!(mode, PageSizeMode::FirstPage));
+    }
+
+    #[test]
+    fn test_fixed_page_size_various_standards() {
+        // A4 (595 x 842 pt)
+        let a4 = PageSizeMode::Fixed {
+            width_pt: 595.0,
+            height_pt: 842.0,
+        };
+        if let PageSizeMode::Fixed {
+            width_pt,
+            height_pt,
+        } = a4
+        {
+            assert_eq!(width_pt, 595.0);
+            assert_eq!(height_pt, 842.0);
+        }
+
+        // US Letter (612 x 792 pt)
+        let letter = PageSizeMode::Fixed {
+            width_pt: 612.0,
+            height_pt: 792.0,
+        };
+        if let PageSizeMode::Fixed {
+            width_pt,
+            height_pt,
+        } = letter
+        {
+            assert_eq!(width_pt, 612.0);
+            assert_eq!(height_pt, 792.0);
+        }
+
+        // US Legal (612 x 1008 pt)
+        let legal = PageSizeMode::Fixed {
+            width_pt: 612.0,
+            height_pt: 1008.0,
+        };
+        if let PageSizeMode::Fixed {
+            width_pt,
+            height_pt,
+        } = legal
+        {
+            assert_eq!(width_pt, 612.0);
+            assert_eq!(height_pt, 1008.0);
+        }
+    }
+
+    #[test]
+    fn test_metadata_default() {
+        let meta = PdfMetadata::default();
+        assert!(meta.title.is_none());
+        assert!(meta.author.is_none());
+        assert!(meta.subject.is_none());
+    }
+
+    #[test]
+    fn test_metadata_partial_fill() {
+        let meta = PdfMetadata {
+            title: Some("Only Title".to_string()),
+            ..Default::default()
+        };
+
+        assert!(meta.title.is_some());
+        assert!(meta.author.is_none());
+        assert!(meta.subject.is_none());
+    }
+
+    #[test]
+    fn test_multiple_images_pdf_verify_pages() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("multi.pdf");
+
+        let images: Vec<_> = (1..=3)
+            .map(|i| PathBuf::from(format!("tests/fixtures/book_page_{}.png", i)))
+            .collect();
+
+        PrintPdfWriter::create_from_images(&images, &output, &PdfWriterOptions::default()).unwrap();
+
+        let doc = lopdf::Document::load(&output).unwrap();
+        assert_eq!(doc.get_pages().len(), 3);
+    }
+
+    #[test]
+    fn test_text_block_unicode() {
+        let unicode_block = TextBlock {
+            x: 100.0,
+            y: 700.0,
+            width: 400.0,
+            height: 20.0,
+            text: "日本語テキスト 中文 한글 🎉".to_string(),
+            font_size: 12.0,
+            vertical: false,
+        };
+
+        assert!(unicode_block.text.contains("日本語"));
+        assert!(unicode_block.text.contains("中文"));
+        assert!(unicode_block.text.contains("한글"));
+    }
+
+    #[test]
+    fn test_text_block_empty_text() {
+        let empty_block = TextBlock {
+            x: 100.0,
+            y: 700.0,
+            width: 400.0,
+            height: 20.0,
+            text: "".to_string(),
+            font_size: 12.0,
+            vertical: false,
+        };
+
+        assert!(empty_block.text.is_empty());
+    }
+
+    #[test]
+    fn test_font_size_variations() {
+        let sizes = [6.0, 8.0, 10.0, 12.0, 14.0, 18.0, 24.0, 36.0, 72.0];
+
+        for size in sizes {
+            let block = TextBlock {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: size * 1.2,
+                text: "Test".to_string(),
+                font_size: size,
+                vertical: false,
+            };
+            assert_eq!(block.font_size, size);
+        }
+    }
+
+    #[test]
+    fn test_builder_full_chain_with_all_options() {
+        let metadata = PdfMetadata {
+            title: Some("Full Test".to_string()),
+            author: Some("Tester".to_string()),
+            ..Default::default()
+        };
+
+        let ocr_layer = OcrLayer { pages: vec![] };
+
+        let options = PdfWriterOptions::builder()
+            .dpi(600)
+            .jpeg_quality(95)
+            .compression(ImageCompression::JpegLossless)
+            .page_size_mode(PageSizeMode::MaxSize)
+            .metadata(metadata)
+            .ocr_layer(ocr_layer)
+            .build();
+
+        assert_eq!(options.dpi, 600);
+        assert_eq!(options.jpeg_quality, 95);
+        assert!(options.metadata.is_some());
+        assert!(options.ocr_layer.is_some());
+    }
+
+    #[test]
+    fn test_error_variants_display() {
+        let errors = [
+            PdfWriterError::NoImages,
+            PdfWriterError::ImageNotFound(PathBuf::from("/test.png")),
+            PdfWriterError::UnsupportedFormat("RAW".to_string()),
+            PdfWriterError::GenerationError("Failed".to_string()),
+        ];
+
+        for err in &errors {
+            let display = format!("{}", err);
+            assert!(!display.is_empty());
+        }
+    }
+
+    // ============================================================
+    // Additional Error handling tests
+    // ============================================================
+
+    #[test]
+    fn test_error_no_images_display() {
+        let err = PdfWriterError::NoImages;
+        let msg = format!("{}", err);
+        assert!(msg.contains("No images provided"));
+    }
+
+    #[test]
+    fn test_error_no_images_debug() {
+        let err = PdfWriterError::NoImages;
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("NoImages"));
+    }
+
+    #[test]
+    fn test_error_image_not_found_display() {
+        let path = PathBuf::from("/test/missing_image.png");
+        let err = PdfWriterError::ImageNotFound(path);
+        let msg = format!("{}", err);
+        assert!(msg.contains("Image not found"));
+        assert!(msg.contains("missing_image.png"));
+    }
+
+    #[test]
+    fn test_error_image_not_found_debug() {
+        let path = PathBuf::from("/test/missing.png");
+        let err = PdfWriterError::ImageNotFound(path);
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("ImageNotFound"));
+    }
+
+    #[test]
+    fn test_error_unsupported_format_display() {
+        let err = PdfWriterError::UnsupportedFormat("HEIC".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("Unsupported image format"));
+        assert!(msg.contains("HEIC"));
+    }
+
+    #[test]
+    fn test_error_unsupported_format_debug() {
+        let err = PdfWriterError::UnsupportedFormat("WEBP".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("UnsupportedFormat"));
+    }
+
+    #[test]
+    fn test_error_io_error_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let err = PdfWriterError::IoError(io_err);
+        let msg = format!("{}", err);
+        assert!(msg.contains("IO error"));
+    }
+
+    #[test]
+    fn test_error_io_error_debug() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "output not found");
+        let err = PdfWriterError::IoError(io_err);
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("IoError"));
+    }
+
+    #[test]
+    fn test_error_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::WriteZero, "disk full");
+        let writer_err: PdfWriterError = io_err.into();
+        let msg = format!("{}", writer_err);
+        assert!(msg.contains("IO error"));
+    }
+
+    #[test]
+    fn test_error_generation_error_display() {
+        let err = PdfWriterError::GenerationError("font embedding failed".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("PDF generation error"));
+        assert!(msg.contains("font embedding failed"));
+    }
+
+    #[test]
+    fn test_error_generation_error_debug() {
+        let err = PdfWriterError::GenerationError("image compression failed".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("GenerationError"));
+    }
+
+    #[test]
+    fn test_error_all_variants_debug_impl() {
+        let errors: Vec<PdfWriterError> = vec![
+            PdfWriterError::NoImages,
+            PdfWriterError::ImageNotFound(PathBuf::from("/test.png")),
+            PdfWriterError::UnsupportedFormat("SVG".to_string()),
+            PdfWriterError::IoError(std::io::Error::other("io")),
+            PdfWriterError::GenerationError("gen fail".to_string()),
+        ];
+
+        for err in &errors {
+            let debug = format!("{:?}", err);
+            assert!(!debug.is_empty());
+            let display = format!("{}", err);
+            assert!(!display.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_error_unsupported_format_empty() {
+        let err = PdfWriterError::UnsupportedFormat(String::new());
+        let msg = format!("{}", err);
+        assert!(msg.contains("Unsupported image format"));
+    }
+
+    #[test]
+    fn test_error_generation_error_with_details() {
+        let err = PdfWriterError::GenerationError("page 5: overflow at 0x1234".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("page 5"));
+        assert!(msg.contains("0x1234"));
+    }
+
+    // ============ Concurrency Tests ============
+
+    #[test]
+    fn test_pdf_writer_types_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PdfWriterOptions>();
+        assert_send_sync::<ImageCompression>();
+        assert_send_sync::<PageSizeMode>();
+        assert_send_sync::<OcrLayer>();
+        assert_send_sync::<OcrPageText>();
+        assert_send_sync::<TextBlock>();
+    }
+
+    #[test]
+    fn test_concurrent_options_building() {
+        use std::thread;
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                thread::spawn(move || {
+                    PdfWriterOptions::builder()
+                        .dpi(300 + (i as u32 * 100))
+                        .jpeg_quality(80 + (i as u8 * 2))
+                        .compression(if i % 2 == 0 {
+                            ImageCompression::Jpeg
+                        } else {
+                            ImageCompression::Flate
+                        })
+                        .build()
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results.len(), 8);
+        for (i, opt) in results.iter().enumerate() {
+            assert_eq!(opt.dpi, 300 + (i as u32 * 100));
+        }
+    }
+
+    #[test]
+    fn test_parallel_text_block_creation() {
+        use rayon::prelude::*;
+
+        let blocks: Vec<_> = (0..100)
+            .into_par_iter()
+            .map(|i| TextBlock {
+                x: i as f64 * 10.0,
+                y: i as f64 * 20.0,
+                width: 100.0,
+                height: 20.0,
+                text: format!("Text block {}", i),
+                font_size: 12.0,
+                vertical: i % 2 == 0,
+            })
+            .collect();
+
+        assert_eq!(blocks.len(), 100);
+        for (i, block) in blocks.iter().enumerate() {
+            assert_eq!(block.x, i as f64 * 10.0);
+            assert!(block.text.contains(&i.to_string()));
+        }
+    }
+
+    #[test]
+    fn test_ocr_layer_thread_transfer() {
+        use std::thread;
+
+        let layer = OcrLayer {
+            pages: vec![OcrPageText {
+                page_index: 0,
+                blocks: vec![TextBlock {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 20.0,
+                    text: "Test".to_string(),
+                    font_size: 12.0,
+                    vertical: false,
+                }],
+            }],
+        };
+
+        let handle = thread::spawn(move || {
+            assert_eq!(layer.pages.len(), 1);
+            assert_eq!(layer.pages[0].blocks.len(), 1);
+            layer.pages[0].blocks[0].text.clone()
+        });
+
+        let result = handle.join().unwrap();
+        assert_eq!(result, "Test");
+    }
+
+    #[test]
+    fn test_options_shared_across_threads() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let options = Arc::new(
+            PdfWriterOptions::builder()
+                .dpi(600)
+                .jpeg_quality(95)
+                .build(),
+        );
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let opts = Arc::clone(&options);
+                thread::spawn(move || {
+                    assert_eq!(opts.dpi, 600);
+                    assert_eq!(opts.jpeg_quality, 95);
+                    opts.dpi
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), 600);
+        }
+    }
+
+    // ============ Boundary Value Tests ============
+
+    #[test]
+    fn test_dpi_boundary_minimum() {
+        let opts = PdfWriterOptions::builder().dpi(1).build();
+        assert_eq!(opts.dpi, 1);
+    }
+
+    #[test]
+    fn test_dpi_boundary_maximum() {
+        let opts = PdfWriterOptions::builder().dpi(2400).build();
+        assert_eq!(opts.dpi, 2400);
+    }
+
+    #[test]
+    fn test_jpeg_quality_clamped_to_min() {
+        let opts = PdfWriterOptions::builder().jpeg_quality(0).build();
+        assert_eq!(opts.jpeg_quality, MIN_JPEG_QUALITY); // Should clamp to 1
+    }
+
+    #[test]
+    fn test_jpeg_quality_clamped_to_max() {
+        let opts = PdfWriterOptions::builder().jpeg_quality(255).build();
+        assert_eq!(opts.jpeg_quality, MAX_JPEG_QUALITY); // Should clamp to 100
+    }
+
+    #[test]
+    fn test_text_block_zero_dimensions() {
+        let block = TextBlock {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            text: String::new(),
+            font_size: 0.0,
+            vertical: false,
+        };
+        assert_eq!(block.width, 0.0);
+        assert_eq!(block.height, 0.0);
+    }
+
+    #[test]
+    fn test_text_block_large_dimensions() {
+        let block = TextBlock {
+            x: 10000.0,
+            y: 10000.0,
+            width: 5000.0,
+            height: 1000.0,
+            text: "Large page".to_string(),
+            font_size: 144.0,
+            vertical: true,
+        };
+        assert_eq!(block.width, 5000.0);
+        assert!(block.vertical);
+    }
+
+    #[test]
+    fn test_font_size_boundary_small() {
+        let block = TextBlock {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 10.0,
+            text: "Tiny".to_string(),
+            font_size: 1.0,
+            vertical: false,
+        };
+        assert_eq!(block.font_size, 1.0);
+    }
+
+    #[test]
+    fn test_font_size_boundary_large() {
+        let block = TextBlock {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 500.0,
+            text: "HUGE".to_string(),
+            font_size: 500.0,
+            vertical: false,
+        };
+        assert_eq!(block.font_size, 500.0);
+    }
+
+    #[test]
+    fn test_fixed_page_size_zero() {
+        let mode = PageSizeMode::Fixed {
+            width_pt: 0.0,
+            height_pt: 0.0,
+        };
+        if let PageSizeMode::Fixed {
+            width_pt,
+            height_pt,
+        } = mode
+        {
+            assert_eq!(width_pt, 0.0);
+            assert_eq!(height_pt, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_fixed_page_size_a4() {
+        // A4 in points: 595.28 x 841.89
+        let mode = PageSizeMode::Fixed {
+            width_pt: 595.28,
+            height_pt: 841.89,
+        };
+        if let PageSizeMode::Fixed {
+            width_pt,
+            height_pt,
+        } = mode
+        {
+            assert!((width_pt - 595.28).abs() < 0.01);
+            assert!((height_pt - 841.89).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn test_ocr_page_text_empty_blocks() {
+        let page = OcrPageText {
+            page_index: 0,
+            blocks: vec![],
+        };
+        assert!(page.blocks.is_empty());
+    }
+
+    #[test]
+    fn test_ocr_layer_many_pages_boundary() {
+        let pages: Vec<OcrPageText> = (0..1000)
+            .map(|i| OcrPageText {
+                page_index: i,
+                blocks: vec![],
+            })
+            .collect();
+
+        let layer = OcrLayer { pages };
+        assert_eq!(layer.pages.len(), 1000);
+    }
+
+    // ============ Issue #43: CJK Font Tests ============
+
+    #[test]
+    fn test_find_cjk_font_nonexistent_path() {
+        // Specifying a non-existent custom path should fall through to system fonts
+        let result = find_cjk_font(Some(Path::new("/nonexistent/font.ttf")));
+        // The custom path doesn't exist, so it should NOT be returned
+        if let Some(ref path) = result {
+            // If a font was found, it must be a system font, NOT the nonexistent path
+            assert_ne!(
+                path,
+                Path::new("/nonexistent/font.ttf"),
+                "Should not return the nonexistent custom path"
+            );
+            assert!(
+                path.exists(),
+                "Returned font path should actually exist: {}",
+                path.display()
+            );
+        }
+        // If None, no system fonts available — that's acceptable
+    }
+
+    #[test]
+    fn test_find_cjk_font_no_custom_path() {
+        // No custom path: search system fonts only
+        let result = find_cjk_font(None);
+        if let Some(ref path) = result {
+            assert!(
+                path.exists(),
+                "Returned system font path should exist: {}",
+                path.display()
+            );
+            // Verify it's a known font file extension
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            assert!(
+                ext == "ttf" || ext == "ttc" || ext == "otf",
+                "Font should have a font file extension, got: {}",
+                path.display()
+            );
+        }
+        // If None, no system fonts available — acceptable in minimal environments
+    }
+
+    #[test]
+    fn test_find_cjk_font_custom_path_exists() {
+        // Create a temp file and verify it's found
+        let temp_dir = tempdir().unwrap();
+        let font_path = temp_dir.path().join("test_font.ttf");
+        std::fs::write(&font_path, b"fake font data").unwrap();
+
+        let result = find_cjk_font(Some(&font_path));
+        assert_eq!(result, Some(font_path));
+    }
+
+    #[test]
+    fn test_pdf_writer_options_with_cjk_font() {
+        let options = PdfWriterOptions::builder()
+            .cjk_font_path("/path/to/font.ttf")
+            .build();
+
+        assert_eq!(
+            options.cjk_font_path,
+            Some(PathBuf::from("/path/to/font.ttf"))
+        );
+    }
+
+    #[test]
+    fn test_pdf_writer_options_default_no_cjk_font() {
+        let options = PdfWriterOptions::default();
+        assert!(options.cjk_font_path.is_none());
+    }
+
+    #[test]
+    fn test_add_ocr_text_empty_blocks() {
+        // OCR layer with empty blocks should not fail
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("output.pdf");
+
+        let ocr_layer = OcrLayer {
+            pages: vec![OcrPageText {
+                page_index: 0,
+                blocks: vec![],
+            }],
+        };
+
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+        let options = PdfWriterOptions::builder().ocr_layer(ocr_layer).build();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+        assert!(output.exists());
+    }
+
+    #[test]
+    fn test_add_ocr_text_fallback_to_helvetica() {
+        // With a non-existent font path and no system fonts matching,
+        // should fallback to Helvetica (ASCII-only but still works)
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("output.pdf");
+
+        let ocr_layer = OcrLayer {
+            pages: vec![OcrPageText {
+                page_index: 0,
+                blocks: vec![TextBlock {
+                    x: 100.0,
+                    y: 100.0,
+                    width: 200.0,
+                    height: 20.0,
+                    text: "ASCII text only".to_string(),
+                    font_size: 12.0,
+                    vertical: false,
+                }],
+            }],
+        };
+
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+        // Don't set cjk_font_path, let it fall back
+        let options = PdfWriterOptions::builder().ocr_layer(ocr_layer).build();
+
+        // This should succeed even without a CJK font
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+        assert!(output.exists());
+    }
+
+    #[test]
+    fn test_add_ocr_text_mixed_ascii_japanese() {
+        // Test mixed ASCII + Japanese text in OCR blocks
+        let ocr_layer = OcrLayer {
+            pages: vec![OcrPageText {
+                page_index: 0,
+                blocks: vec![
+                    TextBlock {
+                        x: 100.0,
+                        y: 700.0,
+                        width: 400.0,
+                        height: 20.0,
+                        text: "Hello World".to_string(),
+                        font_size: 12.0,
+                        vertical: false,
+                    },
+                    TextBlock {
+                        x: 100.0,
+                        y: 680.0,
+                        width: 400.0,
+                        height: 20.0,
+                        text: "日本語テキスト".to_string(),
+                        font_size: 12.0,
+                        vertical: false,
+                    },
+                    TextBlock {
+                        x: 100.0,
+                        y: 660.0,
+                        width: 400.0,
+                        height: 20.0,
+                        text: "Mixed 混合テスト text".to_string(),
+                        font_size: 12.0,
+                        vertical: false,
+                    },
+                ],
+            }],
+        };
+
+        let options = PdfWriterOptions::builder()
+            .ocr_layer(ocr_layer.clone())
+            .build();
+
+        assert_eq!(options.ocr_layer.unwrap().pages[0].blocks.len(), 3);
+    }
+
+    #[test]
+    fn test_add_ocr_text_invisible_rendering_mode() {
+        // Verify OCR text uses invisible rendering mode (structural test)
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("ocr_invisible.pdf");
+
+        let ocr_layer = OcrLayer {
+            pages: vec![OcrPageText {
+                page_index: 0,
+                blocks: vec![TextBlock {
+                    x: 50.0,
+                    y: 50.0,
+                    width: 200.0,
+                    height: 20.0,
+                    text: "Invisible text".to_string(),
+                    font_size: 10.0,
+                    vertical: false,
+                }],
+            }],
+        };
+
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+        let options = PdfWriterOptions::builder().ocr_layer(ocr_layer).build();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+        assert!(output.exists());
+        // The PDF is generated; rendering mode is set internally
+    }
+
+    #[test]
+    fn test_find_cjk_font_system_paths() {
+        // Verify CJK_FONT_SEARCH_PATHS constant is non-empty
+        assert!(!CJK_FONT_SEARCH_PATHS.is_empty());
+
+        // All paths should be absolute
+        for path_str in CJK_FONT_SEARCH_PATHS {
+            let path = Path::new(path_str);
+            assert!(
+                path.is_absolute(),
+                "CJK font path should be absolute: {}",
+                path_str
+            );
+        }
+    }
+
+    #[test]
+    fn test_ocr_text_coordinate_conversion() {
+        // Verify coordinate conversion from points to mm
+        let block = TextBlock {
+            x: 72.0,  // 1 inch in points
+            y: 144.0, // 2 inches in points
+            width: 100.0,
+            height: 20.0,
+            text: "Test".to_string(),
+            font_size: 12.0,
+            vertical: false,
+        };
+
+        // 72 points * POINTS_TO_MM ≈ 25.4 mm (1 inch)
+        let x_mm = block.x as f32 * POINTS_TO_MM;
+        let expected_x_mm = 25.4_f32;
+        assert!(
+            (x_mm - expected_x_mm).abs() < 0.1,
+            "x_mm={} expected={}",
+            x_mm,
+            expected_x_mm
+        );
+
+        // 144 points ≈ 50.8 mm (2 inches)
+        let y_mm = block.y as f32 * POINTS_TO_MM;
+        let expected_y_mm = 50.8_f32;
+        assert!(
+            (y_mm - expected_y_mm).abs() < 0.1,
+            "y_mm={} expected={}",
+            y_mm,
+            expected_y_mm
+        );
+    }
+
+    #[test]
+    fn test_ocr_text_vertical_block_positions() {
+        // Vertical text blocks should have height > width
+        let vertical_block = TextBlock {
+            x: 500.0,
+            y: 50.0,
+            width: 20.0,
+            height: 600.0,
+            text: "縦書き長文テスト".to_string(),
+            font_size: 14.0,
+            vertical: true,
+        };
+
+        assert!(vertical_block.vertical);
+        assert!(vertical_block.height > vertical_block.width);
+    }
+
+    #[test]
+    fn test_ocr_page_text_multiple_blocks() {
+        // Multiple blocks per page with mixed directions
+        let page_text = OcrPageText {
+            page_index: 0,
+            blocks: vec![
+                TextBlock {
+                    x: 50.0,
+                    y: 700.0,
+                    width: 400.0,
+                    height: 20.0,
+                    text: "横書き1行目".to_string(),
+                    font_size: 12.0,
+                    vertical: false,
+                },
+                TextBlock {
+                    x: 50.0,
+                    y: 680.0,
+                    width: 400.0,
+                    height: 20.0,
+                    text: "横書き2行目".to_string(),
+                    font_size: 12.0,
+                    vertical: false,
+                },
+                TextBlock {
+                    x: 500.0,
+                    y: 50.0,
+                    width: 20.0,
+                    height: 500.0,
+                    text: "縦書きブロック".to_string(),
+                    font_size: 12.0,
+                    vertical: true,
+                },
+            ],
+        };
+
+        assert_eq!(page_text.blocks.len(), 3);
+        assert!(!page_text.blocks[0].vertical);
+        assert!(!page_text.blocks[1].vertical);
+        assert!(page_text.blocks[2].vertical);
+    }
+
+    #[test]
+    fn test_builder_with_cjk_font_full_chain() {
+        let options = PdfWriterOptions::builder()
+            .dpi(600)
+            .jpeg_quality(95)
+            .cjk_font_path("/usr/share/fonts/noto/NotoSansCJK-Regular.ttc")
+            .build();
+
+        assert_eq!(options.dpi, 600);
+        assert_eq!(options.jpeg_quality, 95);
+        assert_eq!(
+            options.cjk_font_path,
+            Some(PathBuf::from(
+                "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc"
+            ))
+        );
+    }
+
+    // ============================================================
+    // Issue #45/#46: PDF size reduction tests
+    // ============================================================
+
+    #[test]
+    fn test_jpeg_compression_reduces_pdf_size() {
+        // Verify that the DCT-compressed PDF is significantly smaller than raw image data
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("compressed.pdf");
+
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+        let options = PdfWriterOptions::builder().jpeg_quality(85).build();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+
+        let pdf_size = std::fs::metadata(&output).unwrap().len();
+        let img = image::open(&images[0]).unwrap();
+        let raw_rgb_size = (img.width() * img.height() * 3) as u64;
+
+        // JPEG-compressed PDF should be much smaller than raw RGB data
+        assert!(
+            pdf_size < raw_rgb_size / 2,
+            "PDF size ({} bytes) should be significantly smaller than raw RGB ({} bytes)",
+            pdf_size,
+            raw_rgb_size
+        );
+    }
+
+    #[test]
+    fn test_multi_page_pdf_size_scales_linearly() {
+        // Multi-page PDF should scale ~linearly with page count (not multiply due to font duplication)
+        let temp_dir = tempdir().unwrap();
+
+        // Single page PDF
+        let output_1 = temp_dir.path().join("one_page.pdf");
+        let images_1 = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+        PrintPdfWriter::create_from_images(&images_1, &output_1, &PdfWriterOptions::default())
+            .unwrap();
+        let size_1 = std::fs::metadata(&output_1).unwrap().len();
+
+        // 5 page PDF
+        let output_5 = temp_dir.path().join("five_pages.pdf");
+        let images_5: Vec<_> = (1..=5)
+            .map(|i| PathBuf::from(format!("tests/fixtures/book_page_{}.png", i)))
+            .collect();
+        PrintPdfWriter::create_from_images(&images_5, &output_5, &PdfWriterOptions::default())
+            .unwrap();
+        let size_5 = std::fs::metadata(&output_5).unwrap().len();
+
+        // 5 pages should be roughly 5x the single page, with some overhead
+        // but NOT 5x + (N-1)*25MB from duplicated fonts
+        let ratio = size_5 as f64 / size_1 as f64;
+        assert!(
+            ratio < 8.0,
+            "5-page PDF size ratio ({:.1}x) should be reasonable (< 8x single page). \
+             1-page: {} bytes, 5-page: {} bytes",
+            ratio,
+            size_1,
+            size_5
+        );
+    }
+
+    #[test]
+    fn test_jpeg_quality_affects_size() {
+        let temp_dir = tempdir().unwrap();
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+
+        // Low quality
+        let output_low = temp_dir.path().join("low_q.pdf");
+        let options_low = PdfWriterOptions::builder().jpeg_quality(30).build();
+        PrintPdfWriter::create_from_images(&images, &output_low, &options_low).unwrap();
+        let size_low = std::fs::metadata(&output_low).unwrap().len();
+
+        // High quality
+        let output_high = temp_dir.path().join("high_q.pdf");
+        let options_high = PdfWriterOptions::builder().jpeg_quality(95).build();
+        PrintPdfWriter::create_from_images(&images, &output_high, &options_high).unwrap();
+        let size_high = std::fs::metadata(&output_high).unwrap().len();
+
+        // Higher quality should produce larger file
+        assert!(
+            size_high > size_low,
+            "High quality PDF ({} bytes) should be larger than low quality ({} bytes)",
+            size_high,
+            size_low
+        );
+    }
+
+    // ============================================================
+    // Viewer Hints Tests (PageLabels, PageLayout, ViewerPreferences)
+    // ============================================================
+
+    #[test]
+    fn test_viewer_hints_default() {
+        let hints = PdfViewerHints::default();
+        assert!(hints.page_number_shift.is_none());
+        assert!(!hints.is_rtl);
+        assert_eq!(hints.first_logical_page, 0);
+    }
+
+    #[test]
+    fn test_viewer_hints_builder() {
+        let hints = PdfViewerHints {
+            page_number_shift: Some(5),
+            is_rtl: true,
+            first_logical_page: 1,
+        };
+        let options = PdfWriterOptions::builder().viewer_hints(hints).build();
+        assert!(options.viewer_hints.is_some());
+        let h = options.viewer_hints.unwrap();
+        assert_eq!(h.page_number_shift, Some(5));
+        assert!(h.is_rtl);
+    }
+
+    #[test]
+    fn test_page_labels_embedded_in_pdf() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("labeled.pdf");
+
+        let images: Vec<_> = (1..=5)
+            .map(|i| PathBuf::from(format!("tests/fixtures/book_page_{}.png", i)))
+            .collect();
+
+        let options = PdfWriterOptions::builder()
+            .viewer_hints(PdfViewerHints {
+                page_number_shift: Some(3),
+                is_rtl: false,
+                first_logical_page: 1,
+            })
+            .build();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+        assert!(output.exists());
+
+        // Verify PageLabels exists in the catalog
+        let doc = lopdf::Document::load(&output).unwrap();
+        let catalog = doc.catalog().unwrap();
+        assert!(
+            catalog.get(b"PageLabels").is_ok(),
+            "PDF should have PageLabels entry"
+        );
+    }
+
+    #[test]
+    fn test_page_layout_set_for_spread() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("spread.pdf");
+
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+
+        let options = PdfWriterOptions::builder()
+            .viewer_hints(PdfViewerHints {
+                page_number_shift: Some(2),
+                is_rtl: false,
+                first_logical_page: 1,
+            })
+            .build();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+
+        let doc = lopdf::Document::load(&output).unwrap();
+        let catalog = doc.catalog().unwrap();
+        let layout = catalog.get(b"PageLayout").unwrap();
+        assert_eq!(
+            layout.as_name_str().unwrap(),
+            "TwoPageRight",
+            "PageLayout should be TwoPageRight for book spread"
+        );
+    }
+
+    #[test]
+    fn test_vertical_r2l_direction() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("vertical.pdf");
+
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+
+        let options = PdfWriterOptions::builder()
+            .viewer_hints(PdfViewerHints {
+                page_number_shift: None,
+                is_rtl: true,
+                first_logical_page: 1,
+            })
+            .build();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+
+        let doc = lopdf::Document::load(&output).unwrap();
+        let catalog = doc.catalog().unwrap();
+
+        // Check PageLayout is set
+        let layout = catalog.get(b"PageLayout").unwrap();
+        assert_eq!(layout.as_name_str().unwrap(), "TwoPageRight");
+
+        // Check ViewerPreferences has Direction R2L
+        let prefs_ref = catalog.get(b"ViewerPreferences").unwrap();
+        if let lopdf::Object::Reference(id) = prefs_ref {
+            let prefs = doc.get_object(*id).unwrap();
+            if let lopdf::Object::Dictionary(d) = prefs {
+                let dir = d.get(b"Direction").unwrap();
+                assert_eq!(
+                    dir.as_name_str().unwrap(),
+                    "R2L",
+                    "Direction should be R2L for RTL books"
+                );
+            } else {
+                panic!("ViewerPreferences should be a dictionary");
+            }
+        } else {
+            panic!("ViewerPreferences should be a reference");
+        }
+    }
+
+    #[test]
+    fn test_no_viewer_hints_no_modification() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("no_hints.pdf");
+
+        let images = vec![PathBuf::from("tests/fixtures/book_page_1.png")];
+        let options = PdfWriterOptions::default();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+
+        let doc = lopdf::Document::load(&output).unwrap();
+        let catalog = doc.catalog().unwrap();
+
+        // No viewer hints = no PageLabels, no PageLayout, no ViewerPreferences
+        assert!(
+            catalog.get(b"PageLabels").is_err(),
+            "Should not have PageLabels without viewer hints"
+        );
+    }
+
+    #[test]
+    fn test_page_labels_with_front_matter() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("front_matter.pdf");
+
+        let images: Vec<_> = (1..=10)
+            .map(|i| PathBuf::from(format!("tests/fixtures/book_page_{}.png", i)))
+            .collect();
+
+        // shift=5 means pages 1-5 are front matter (roman numerals),
+        // page 6 onward is main content starting at page 1
+        let options = PdfWriterOptions::builder()
+            .viewer_hints(PdfViewerHints {
+                page_number_shift: Some(5),
+                is_rtl: false,
+                first_logical_page: 1,
+            })
+            .build();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+
+        let doc = lopdf::Document::load(&output).unwrap();
+        let catalog = doc.catalog().unwrap();
+        assert!(catalog.get(b"PageLabels").is_ok());
+    }
+
+    #[test]
+    fn test_combined_hints_all_features() {
+        let temp_dir = tempdir().unwrap();
+        let output = temp_dir.path().join("all_hints.pdf");
+
+        let images: Vec<_> = (1..=5)
+            .map(|i| PathBuf::from(format!("tests/fixtures/book_page_{}.png", i)))
+            .collect();
+
+        // All features: page labels + spread + R2L
+        let options = PdfWriterOptions::builder()
+            .viewer_hints(PdfViewerHints {
+                page_number_shift: Some(2),
+                is_rtl: true,
+                first_logical_page: 1,
+            })
+            .build();
+
+        PrintPdfWriter::create_from_images(&images, &output, &options).unwrap();
+
+        let doc = lopdf::Document::load(&output).unwrap();
+        let catalog = doc.catalog().unwrap();
+
+        // All three features should be present
+        assert!(catalog.get(b"PageLabels").is_ok(), "PageLabels present");
+        assert_eq!(
+            catalog.get(b"PageLayout").unwrap().as_name_str().unwrap(),
+            "TwoPageRight",
+            "PageLayout set"
+        );
+        assert!(
+            catalog.get(b"ViewerPreferences").is_ok(),
+            "ViewerPreferences present"
+        );
+    }
+}

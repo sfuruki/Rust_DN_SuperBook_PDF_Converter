@@ -1,38 +1,62 @@
-# superbook-pdf Docker/Podman Compose Configuration
-# Backend + Frontend Architecture with GPU/CPU Support
-#
-# Usage:
-#   # GPU環境 (デフォルト)
-#   docker compose up -d
-#
-#   # CPU環境 (GPUなし)
-#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
-#
-#   # ログ確認
-#   docker compose logs -f
-#
-#   # 停止
-#   docker compose down
-#
-# Podman:
-#   podman compose up -d                                              # GPU環境
-#   podman compose -f docker-compose.yml -f docker-compose.cpu.yml up -d  # CPU環境
-
 name: superbook-pdf
 
 services:
   # =============================================================
-  # Backend: Rust API Server with NVIDIA GPU Support
+  # 1. Frontend: Web UI (Nginx)
   # =============================================================
-  backend:
+  web-ui:
     build:
-      context: superbook-pdf
-      dockerfile: docker/backend/Dockerfile
-    image: superbook-pdf-backend:latest
-    container_name: superbook-backend
+      context: ./web_ui
+      dockerfile: Dockerfile
+    image: superbook-frontend:latest
+    container_name: superbook-web-ui
     restart: unless-stopped
+    depends_on:
+      rust-core:
+        condition: service_healthy
+    ports:
+      - "${SUPERBOOK_PORT:-8080}:80"
+    networks:
+      - superbook-net
 
-    # GPU Support (NVIDIA)
+  # =============================================================
+  # 2. Orchestrator: Rust Core
+  # =============================================================
+  rust-core:
+    build:
+      context: ./rust-core
+      dockerfile: Dockerfile
+    image: superbook-rust-core:latest
+    container_name: superbook-rust-core
+    restart: unless-stopped
+    environment:
+      - RUST_LOG=info
+      - SUPERBOOK_WORK_DIR=/data/work
+      # マイクロサービス間の通信用URL
+      - UPSCALE_SERVICE_URL=http://upscale-service:8000
+      - OCR_SERVICE_URL=http://ocr-service:8001
+    volumes:
+      - ./data/input:/data/input:ro
+      - ./data/output:/data/output:rw
+      - ./data/work:/data/work:rw
+    networks:
+      - superbook-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # =============================================================
+  # 3. AI Service: Upscale (RealESRGAN / Torch 1.x)
+  # =============================================================
+  upscale-service:
+    build:
+      context: ./ai_services/upscale
+      dockerfile: Dockerfile
+    image: superbook-upscale:latest
+    container_name: superbook-upscale
+    restart: unless-stopped
     deploy:
       resources:
         reservations:
@@ -40,75 +64,46 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - SUPERBOOK_VENV=/app/ai_venv
-      # --- 追加箇所: ブリッジスクリプトのディレクトリを指定 ---
-      - SUPERBOOK_BRIDGE_SCRIPTS_DIR=/app
-      - SUPERBOOK_BIND=0.0.0.0
-      - SUPERBOOK_PORT=8080
-      - SUPERBOOK_WORK_DIR=/data/work
-      - RUST_LOG=info
-
     volumes:
-      - ./data/input:/data/input:rw
-      - ./data/output:/data/output:rw
       - ./data/work:/data/work:rw
       - ai-cache:/root/.cache
-
     networks:
       - superbook-net
 
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/stats"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
   # =============================================================
-  # Frontend: Nginx Web UI with Reverse Proxy
+  # 4. AI Service: OCR (YomiToku / Torch 2.x)
   # =============================================================
-  frontend:
+  ocr-service:
     build:
-      context: superbook-pdf/docker/frontend
+      context: ./ai_services/ocr
       dockerfile: Dockerfile
-    image: superbook-pdf-frontend:latest
-    container_name: superbook-frontend
+    image: superbook-ocr:latest
+    container_name: superbook-ocr
     restart: unless-stopped
-    depends_on:
-      backend:
-        condition: service_healthy
-
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     environment:
-      - BACKEND_HOST=backend
-      - BACKEND_PORT=8080
-
-    ports:
-      - "${SUPERBOOK_PORT:-8080}:80"
-
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ./data/work:/data/work:rw
+      - ai-cache:/root/.cache
     networks:
       - superbook-net
 
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-
-# =============================================================
-# Networks
-# =============================================================
 networks:
   superbook-net:
     driver: bridge
 
-# =============================================================
-# Volumes
-# =============================================================
 volumes:
   ai-cache:
     driver: local
+    
