@@ -383,14 +383,79 @@ impl RealEsrgan {
         output_path: &Path,
         options: &RealEsrganOptions,
     ) -> Result<UpscaleResult> {
-        // ... (省略: すでに async 実装済み) ...
-        let result = self.bridge.execute(
-            AiTool::RealESRGAN,
-            &[input_path.to_path_buf()],
-            output_path.parent().unwrap(),
-            options,
-        ).await.map_err(RealEsrganError::BridgeError)?; // 🚀 .await が必要
-        // ...
+        // 入力ファイルの存在確認
+        if !input_path.exists() {
+            return Err(RealEsrganError::InputNotFound(input_path.to_path_buf()));
+        }
+
+        // 元画像のサイズを取得し、処理時間を計測開始 [2]
+        let img = image::open(input_path).map_err(|e| RealEsrganError::ImageError(e.to_string()))?;
+        let original_size = (img.width(), img.height());
+        let start_time = std::time::Instant::now();
+
+        // 出力先ディレクトリの準備
+        let output_dir = output_path.parent().unwrap_or(Path::new("."));
+        if !output_dir.exists() {
+            std::fs::create_dir_all(output_dir)
+                .map_err(|_| RealEsrganError::OutputNotWritable(output_dir.to_path_buf()))?;
+        }
+
+        // 🚀 AIブリッジ経由で実行。execute は非同期メソッドのため .await が必須 [2]
+        let result = self
+            .bridge
+            .execute(
+                AiTool::RealESRGAN,
+                &[input_path.to_path_buf()],
+                output_dir,
+                options,
+            )
+            .await
+            .map_err(RealEsrganError::BridgeError)?;
+
+        // 実行結果の成否を確認
+        if !result.failed_files.is_empty() {
+            let (_, error) = &result.failed_files;
+            return Err(RealEsrganError::ProcessingFailed(error.clone()));
+        }
+
+        // ブリッジ（HTTP API または サブプロセス）の出力命名規則に合わせて生成ファイルを特定 [3, 4]
+        // 通常は {input_stem}_upscaled.{ext} という名前で保存される
+        let bridge_output = output_dir.join(format!(
+            "{}_upscaled.{}",
+            input_path.file_stem().unwrap_or_default().to_string_lossy(),
+            input_path.extension().unwrap_or_default().to_string_lossy()
+        ));
+
+        // ユーザーが指定した output_path と異なる場合はリネームを行う (ゼロコピー転送対応) [5]
+        if bridge_output != output_path && bridge_output.exists() {
+            std::fs::rename(&bridge_output, output_path).map_err(|e| {
+                RealEsrganError::ProcessingFailed(format!("Failed to rename output file: {}", e))
+            })?;
+        }
+
+        // 最終的な出力ファイルの存在を確認し、拡大後の画像サイズを取得 [6]
+        if !output_path.exists() {
+            return Err(RealEsrganError::ProcessingFailed(format!(
+                "Output file not found: {}",
+                output_path.display()
+            )));
+        }
+
+        let output_img = image::open(output_path).map_err(|e| RealEsrganError::ImageError(e.to_string()))?;
+        let upscaled_size = (output_img.width(), output_img.height());
+        let actual_scale = upscaled_size.0 as f32 / original_size.0 as f32;
+
+        // 🚀 修正(E0308対策): 末尾にセミコロン「;」を付けないでください
+        // これにより、Result<UpscaleResult> が戻り値として返されます
+        Ok(UpscaleResult {
+            input_path: input_path.to_path_buf(),
+            output_path: output_path.to_path_buf(),
+            original_size,
+            upscaled_size,
+            actual_scale,
+            processing_time: start_time.elapsed(),
+            vram_used_mb: result.gpu_stats.map(|s| s.peak_vram_mb),
+        }) 
     }
 
     /// 🚀 修正: pub fn から pub async fn に変更
@@ -472,6 +537,21 @@ impl RealEsrgan {
         // これにより、Future オブジェクトではなく Result<BatchUpscaleResult> が返されます [1, 4]
         self.upscale_batch(&input_files, output_dir, options, progress).await
     }
+    pub fn available_models_list(&self) -> Vec<RealEsrganModel> {
+        vec![
+            RealEsrganModel::X4Plus,
+            RealEsrganModel::X4PlusAnime,
+            RealEsrganModel::NetX4Plus,
+            RealEsrganModel::X2Plus,
+        ]
+    }
+
+    /// 🚀 修正(無限再帰対策): 同様に固有メソッド名を変更
+    pub fn calculate_recommended_tile_size(&self, _image_size: (u32, u32), available_vram_mb: u64) -> u32 {
+        let scale_factor = (available_vram_mb as f64 / BASE_VRAM_MB as f64).sqrt();
+        let recommended = (DEFAULT_TILE_SIZE as f64 * scale_factor) as u32;
+        recommended.clamp(MIN_TILE_SIZE, MAX_TILE_SIZE)
+    }
 }
 
 #[async_trait]
@@ -501,11 +581,13 @@ impl RealEsrganProcessor for RealEsrgan {
     }
 
     fn available_models(&self) -> Vec<RealEsrganModel> {
-        self.available_models()
+        // 🚀 自身の固有メソッド (available_models_list) を呼ぶことで再帰を避ける
+        self.available_models_list()
     }
 
     fn recommended_tile_size(&self, size: (u32, u32), vram: u64) -> u32 {
-        self.recommended_tile_size(size, vram)
+        // 🚀 同様に固有メソッド名を呼ぶ
+        self.calculate_recommended_tile_size(size, vram)
     }
 }
 
