@@ -10,7 +10,7 @@ use std::time::Instant;
 use thiserror::Error;
 
 use std::sync::Arc;
-use crate::ai_bridge::AiBridge;
+use crate::ai_bridge::{AiBridge, AiTool};
 
 use crate::cli::MarkdownArgs;
 use crate::figure_detect::{FigureDetectOptions, FigureDetector, FigureRegion, PageClassification};
@@ -273,7 +273,6 @@ impl MarkdownPipeline {
         let venv_path = crate::resolve_venv_path();
         let bridge_config = crate::AiBridgeConfig::default();
         let bridge: Arc<dyn AiBridge> = if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
-        // 明示的に HttpApiBridge::new() の Result を処理する
             let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
                 .map_err(|e| MarkdownPipelineError::OcrError(e.to_string()))?;
             Arc::new(b)
@@ -305,7 +304,7 @@ impl MarkdownPipeline {
 
             // Run OCR (or create empty result if YomiToku unavailable)
             let ocr_result = if self.config.ocr {
-                match yomitoku.ocr(image_path, &yomitoku_options).await { // .await を追加
+                match yomitoku.ocr(image_path, &yomitoku_options).await {
                     Ok(result) => result,
                     Err(e) => {
                         progress.on_debug(&format!("ページ {} OCRエラー: {}", page_idx + 1, e));
@@ -576,24 +575,22 @@ impl MarkdownPipeline {
     }
 
     /// AI upscale step (reuses same pattern as pipeline)
-    fn step_upscale<P: ProgressCallback>(
+    async fn step_upscale<P: ProgressCallback>(
         &self,
         output_dir: &Path,
         images: &[PathBuf],
         progress: &P,
     ) -> Result<Vec<PathBuf>, MarkdownPipelineError> {
-        let venv_path = crate::resolve_venv_path();
-
-        let bridge_config = crate::AiBridgeConfig::builder()
-            .venv_path(venv_path)
-            .build();
-
-        let bridge = match crate::SubprocessBridge::new(bridge_config) {
-            Ok(b) => b,
-            Err(e) => {
-                progress.on_warning(&format!("RealESRGAN利用不可: {}", e));
-                return Ok(images.to_vec());
-            }
+        // 🚀 修正: メソッド自体を async fn に変更し、内部でも DI を適用
+        let bridge_config = crate::AiBridgeConfig::default();
+        let bridge: Arc<dyn AiBridge> = if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
+            let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
+                .map_err(|e| MarkdownPipelineError::Pipeline(PipelineError::ImageProcessingFailed(e.to_string())))?;
+            Arc::new(b)
+        } else {
+            let b = crate::SubprocessBridge::new(bridge_config)
+                .map_err(|e| MarkdownPipelineError::Pipeline(PipelineError::ImageProcessingFailed(e.to_string())))?;
+            Arc::new(b)
         };
 
         let esrgan = crate::RealEsrgan::new(bridge);
@@ -603,14 +600,11 @@ impl MarkdownPipeline {
         }
         let options = options.build();
 
-        match esrgan.upscale_batch(images, output_dir, &options, None) {
+        // 🚀 修正: upscale_batch は非同期になったため、直接 .await する [2, 5]
+        match esrgan.upscale_batch(images, output_dir, &options, None).await {
             Ok(result) => {
                 progress.on_step_complete("超解像", &format!("{}画像", result.successful.len()));
-                Ok(result
-                    .successful
-                    .iter()
-                    .map(|r| r.output_path.clone())
-                    .collect())
+                Ok(result.successful.iter().map(|r| r.output_path.clone()).collect())
             }
             Err(e) => {
                 progress.on_warning(&format!("超解像失敗: {}", e));

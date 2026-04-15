@@ -25,14 +25,13 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio}; // ローカル実行(SubprocessBridge)との互換性のために維持
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use std::collections::HashMap;
-use std::sync::Arc; // 各モジュールでブリッジを共有(DI)するために必須
+use std::sync::Arc;
 use thiserror::Error;
-
 use reqwest::Client;
-use serde::{Deserialize, Serialize}; // APIの応答を解析するために Deserialize も有効化
+use serde::{Deserialize, Serialize};
 use async_trait::async_trait;
 
 // ============================================================
@@ -933,32 +932,21 @@ impl AiBridge for SubprocessBridge {
 // --- HttpApiBridge の完全実装 ---
 #[async_trait]
 impl AiBridge for HttpApiBridge {
-    fn new(config: AiBridgeConfig) -> Result<Self> {
-        let mut service_urls = HashMap::new();
-        // docker-compose.yml の環境変数から取得、なければデフォルト
-        service_urls.insert(AiTool::RealESRGAN, std::env::var("UPSCALE_SERVICE_URL").unwrap_or_else(|_| "http://upscale-service:8000".into()));
-        service_urls.insert(AiTool::YomiToku, std::env::var("OCR_SERVICE_URL").unwrap_or_else(|_| "http://ocr-service:8001".into()));
-
-        Ok(Self {
-            config,
-            client: Client::builder()
-                .timeout(Duration::from_secs(3600)) // 1時間のタイムアウト（巨大PDF考慮）
-                .build()
-                .map_err(|e| AiBridgeError::ProcessFailed(e.to_string()))?,
-            service_urls,
-        })
+    fn new(config: AiBridgeConfig) -> Result<Self, AiBridgeError> {
+        Self::new(config)
     }
 
     fn config(&self) -> &AiBridgeConfig {
         &self.config
     }
 
-    async fn check_tool(&self, _tool: AiTool) -> Result<bool> {
-        Ok(true) // マイクロサービス環境では起動していればOKとみなす
+    async fn check_tool(&self, _tool: AiTool) -> Result<bool, AiBridgeError> {
+        // コンテナが起動していれば利用可能とみなす（/health 等でチェックするように拡張可能）
+        Ok(true)
     }
 
-    async fn check_gpu(&self) -> Result<GpuStats> {
-        // 各サービスの /version 等から取得するように拡張可能 [3, 4]
+    async fn check_gpu(&self) -> Result<GpuStats, AiBridgeError> {
+        // モック実装。本来は各サービスから情報を取得する [4]
         Ok(GpuStats { peak_vram_mb: 0, avg_utilization: 0.0 })
     }
 
@@ -968,64 +956,67 @@ impl AiBridge for HttpApiBridge {
         input_files: &[PathBuf],
         output_dir: &Path,
         tool_options: &(dyn std::any::Any + Send + Sync),
-    ) -> Result<AiTaskResult> {
-        let start_time = std::time::Instant::now();
-        let url = self.service_urls.get(&tool).ok_or_else(|| AiBridgeError::ProcessFailed("URL not configured".into()))?;
+    ) -> Result<AiTaskResult, AiBridgeError> {
+        let start_time = Instant::now();
+        let url = self.service_urls.get(&tool)
+            .ok_or_else(|| AiBridgeError::ProcessFailed("Service URL not configured".into()))?;
+        
         let mut processed = Vec::new();
+        let mut failed = Vec::new();
 
         for input_file in input_files {
             let res = match tool {
                 AiTool::RealESRGAN => {
-                    // tool_options を RealEsrganOptions にダウンキャスト
                     let opts = tool_options.downcast_ref::<crate::realesrgan::RealEsrganOptions>()
-                        .ok_or_else(|| AiBridgeError::ProcessFailed("Invalid options type for RealESRGAN".into()))?;
+                        .ok_or_else(|| AiBridgeError::ProcessFailed("Invalid options for RealESRGAN".into()))?;
                     
-                    let endpoint = format!("{}/upscale", url);
                     let payload = UpscaleRequest {
-                        input_path: input_file.to_string_lossy().into(),
-                        output_path: output_dir.join(format!("{}_upscaled.png", input_file.file_stem().unwrap().to_string_lossy())).to_string_lossy().into(),
+                        input_path: input_file.to_string_lossy().to_string(),
+                        output_path: output_dir.join(format!(
+                            "{}_upscaled.png", 
+                            input_file.file_stem().unwrap().to_string_lossy()
+                        )).to_string_lossy().to_string(),
                         scale: opts.scale,
                         tile: opts.tile_size,
                         model_name: opts.model.model_name().to_string(),
                         fp32: !opts.fp16,
                         gpu_id: opts.gpu_id.unwrap_or(0) as i32,
                     };
-                    self.client.post(&endpoint).json(&payload).send().await
+                    self.client.post(format!("{}/upscale", url)).json(&payload).send().await
                 },
                 AiTool::YomiToku => {
-                    // tool_options を YomiTokuOptions にダウンキャスト
                     let opts = tool_options.downcast_ref::<crate::yomitoku::YomiTokuOptions>()
-                        .ok_or_else(|| AiBridgeError::ProcessFailed("Invalid options type for YomiToku".into()))?;
+                        .ok_or_else(|| AiBridgeError::ProcessFailed("Invalid options for YomiToku".into()))?;
                     
-                    let endpoint = format!("{}/ocr", url);
                     let payload = OcrRequest {
-                        input_path: input_file.to_string_lossy().into(),
+                        input_path: input_file.to_string_lossy().to_string(),
                         gpu_id: opts.gpu_id.unwrap_or(0) as i32,
                         confidence: opts.confidence_threshold,
                         format: "json".into(),
                     };
-                    self.client.post(&endpoint).json(&payload).send().await
+                    self.client.post(format!("{}/ocr", url)).json(&payload).send().await
                 }
-            }.map_err(|e| AiBridgeError::ProcessFailed(format!("HTTP Request failed: {}", e)))?;
+            };
 
-            if res.status().is_success() {
-                processed.push(input_file.clone());
-            } else {
-                let err_msg = res.text().await.unwrap_or_else(|_| "Unknown API error".into());
-                return Err(AiBridgeError::ProcessFailed(err_msg));
+            match res {
+                Ok(resp) if resp.status().is_success() => processed.push(input_file.clone()),
+                Ok(resp) => failed.push((input_file.clone(), format!("HTTP error: {}", resp.status()))),
+                Err(e) => failed.push((input_file.clone(), e.to_string())),
             }
         }
 
         Ok(AiTaskResult {
             processed_files: processed,
             skipped_files: vec![],
-            failed_files: vec![],
+            failed_files: failed,
             duration: start_time.elapsed(),
             gpu_stats: None,
         })
     }
 
-    async fn cancel(&self) -> Result<()> { Ok(()) }
+    async fn cancel(&self) -> Result<(), AiBridgeError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2362,23 +2353,23 @@ mod tests {
         assert_eq!(format!("{}", AiTool::YomiToku), "YomiToku");
     }
 }
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct UpscaleRequest {
-    pub input_path: String,
-    pub output_path: String,
-    pub scale: u32,
-    pub tile: u32,
-    pub model_name: String, // 🚀 追加
-    pub fp32: bool,         // 🚀 追加
-    pub gpu_id: i32,        // 🚀 追加
+    input_path: String,
+    output_path: String,
+    scale: u32,
+    tile: u32,
+    model_name: String,
+    fp32: bool,
+    gpu_id: i32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct OcrRequest {
-    pub input_path: String,
-    pub gpu_id: i32,
-    pub confidence: f32,
-    pub format: String,
+    input_path: String,
+    gpu_id: i32,
+    confidence: f32,
+    format: String,
 }
 /// HTTP APIベースのブリッジ実装 (マイクロサービス構成用)
 pub struct HttpApiBridge {
@@ -2388,42 +2379,29 @@ pub struct HttpApiBridge {
 }
 
 impl HttpApiBridge {
-    /// サービスのURLを環境変数から取得して初期化
-    pub fn new(config: AiBridgeConfig) -> Self {
+    /// 新しい HttpApiBridge を生成。
+    /// エラーログ [1] で指摘されている map_err 等を呼ぶために、
+    /// ここで明示的に Result<Self, AiBridgeError> を返す inherent impl が必要です。
+    pub fn new(config: AiBridgeConfig) -> Result<Self, AiBridgeError> {
         let mut service_urls = HashMap::new();
         
-        // docker-compose.yml で定義したサービス名に基づきURLを取得
-        let upscale_url = std::env::var("UPSCALE_SERVICE_URL")
-            .unwrap_or_else(|_| "http://upscale-service:8000".to_string());
-        let ocr_url = std::env::var("OCR_SERVICE_URL")
-            .unwrap_or_else(|_| "http://ocr-service:8001".to_string());
+        // docker-compose.yml 等の環境変数からURLを取得 [2, 3]
+        service_urls.insert(
+            AiTool::RealESRGAN, 
+            std::env::var("UPSCALE_SERVICE_URL").unwrap_or_else(|_| "http://upscale-service:8000".into())
+        );
+        service_urls.insert(
+            AiTool::YomiToku, 
+            std::env::var("OCR_SERVICE_URL").unwrap_or_else(|_| "http://ocr-service:8001".into())
+        );
 
-        service_urls.insert(AiTool::RealESRGAN, upscale_url);
-        service_urls.insert(AiTool::YomiToku, ocr_url);
-
-        Self {
+        Ok(Self {
             config,
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(3600)) // 巨大PDFを考慮した1時間タイムアウト [4]
+                .build()
+                .map_err(|e| AiBridgeError::ProcessFailed(e.to_string()))?,
             service_urls,
-        }
-    }
-
-    /// 各マイクロサービスとの接続確認 (ハンドシェイク)
-    /// 起動時に実行し、/version エンドポイントから互換性を確認します。
-    pub async fn handshake(&self) -> Result<()> {
-        for (tool, url) in &self.service_urls {
-            let version_url = format!("{}/version", url);
-            match self.client.get(&version_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    let info: serde_json::Value = resp.json().await
-                        .map_err(|e| AiBridgeError::ProcessFailed(format!("Response error: {}", e)))?;
-                    println!("  [OK] Connected to {} service: {}", tool.display_name(), info["service"]);
-                }
-                _ => {
-                    eprintln!("  [WARN] Failed to connect to {} at {}", tool.display_name(), url);
-                }
-            }
-        }
-        Ok(())
+        })
     }
 }

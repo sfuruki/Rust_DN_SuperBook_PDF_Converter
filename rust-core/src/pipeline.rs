@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
-
+use futures::executor::block_on;
 use crate::cli::ConvertArgs;
 
 use crate::ai_bridge::AiBridge;
@@ -1227,35 +1227,39 @@ impl PdfPipeline {
         let upscaled_dir = work_dir.join("upscaled");
         std::fs::create_dir_all(&upscaled_dir)?;
 
-        // Try to initialize RealESRGAN
-        let venv_path = crate::resolve_venv_path();
-
         let bridge_config = crate::AiBridgeConfig::default();
-
+        
+        // 🚀 修正(E0308, E0599): 明示的に Arc<dyn AiBridge> 型を指定し、
+        // unwrap ではなく map_err を使用して PipelineError に変換します。
         let bridge: Arc<dyn AiBridge> = if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
-            Arc::new(crate::ai_bridge::HttpApiBridge::new(bridge_config).unwrap())
+            let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
+                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?;
+            Arc::new(b)
         } else {
-            Arc::new(crate::SubprocessBridge::new(bridge_config).unwrap())
+            let b = crate::SubprocessBridge::new(bridge_config)
+                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?;
+            Arc::new(b)
         };
 
-
         let esrgan = crate::RealEsrgan::new(bridge);
-        let mut options = crate::RealEsrganOptions::builder().scale(2);
+        let mut options = crate::realesrgan::RealEsrganOptions::builder().scale(2);
         if self.config.gpu {
             options = options.gpu_id(0);
         }
         let options = options.build();
 
-        match futures::executor::block_on(esrgan.upscale_batch(images, &upscaled_dir, &options, None)) {
-        Ok(result) => {
-            progress.on_step_complete("超解像", &format!("{}画像", result.successful.len()));
-            Ok(result.successful.iter().map(|r| r.output_path.clone()).collect())
+        // 🚀 修正(E0277): realesrgan.rs の修正により upscale_batch は async fn になったため、
+        // ここでの block_on 呼び出しは正しい Future を受け取るようになります。
+        match block_on(esrgan.upscale_batch(images, &upscaled_dir, &options, None)) {
+            Ok(result) => {
+                progress.on_step_complete("超解像", &format!("{}画像", result.successful.len()));
+                Ok(result.successful.iter().map(|r| r.output_path.clone()).collect())
+            }
+            Err(e) => {
+                progress.on_warning(&format!("超解像失敗: {}", e));
+                Ok(images.to_vec())
+            }
         }
-        Err(e) => {
-            progress.on_warning(&format!("超解像失敗: {}", e));
-            Ok(images.to_vec())
-        }
-    }
     }
 
     /// Step 6: Internal resolution normalization (skip blank pages)
@@ -1591,18 +1595,21 @@ impl PdfPipeline {
         progress: &P,
     ) -> Result<Vec<Option<crate::OcrResult>>, PipelineError> {
         progress.on_step_start("Running OCR (YomiToku)...");
-
-        let venv_path = crate::resolve_venv_path();
-
         let bridge_config = crate::AiBridgeConfig::default();
+        
+        // 🚀 修正: upscale と同様に、DI用のブリッジ生成を型安全に行います。
         let bridge: Arc<dyn AiBridge> = if std::env::var("OCR_SERVICE_URL").is_ok() {
-            Arc::new(crate::ai_bridge::HttpApiBridge::new(bridge_config).unwrap())
+            let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
+                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?;
+            Arc::new(b)
         } else {
-             Arc::new(crate::SubprocessBridge::new(bridge_config).unwrap())
+            let b = crate::SubprocessBridge::new(bridge_config)
+                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?;
+            Arc::new(b)
         };
 
         let yomitoku = crate::YomiToku::new(bridge);
-        let mut ocr_opts = crate::YomiTokuOptions::builder();
+        let mut ocr_opts = crate::yomitoku::YomiTokuOptions::builder();
         if self.config.gpu {
             ocr_opts = ocr_opts.use_gpu(true).gpu_id(0);
         }
@@ -1610,13 +1617,16 @@ impl PdfPipeline {
 
         let mut results = Vec::new();
         for img_path in images {
-            // ocr() を .await して実行 (PdfPipelineが同期のため block_on を検討)
-            match futures::executor::block_on(yomitoku.ocr(img_path, &ocr_opts)) {
+            // 🚀 修正: yomitoku.rs の修正により ocr メソッドは async fn に変更されました。
+            // PdfPipeline 全体が同期設計のため、個別に block_on で解決します。
+            match block_on(yomitoku.ocr(img_path, &ocr_opts)) {
                 Ok(result) => results.push(Some(result)),
-                Err(_) => results.push(None),
+                Err(e) => {
+                    progress.on_debug(&format!("OCR失敗 ({}): {}", img_path.display(), e));
+                    results.push(None)
+                },
             }
         }
-
         let success_count = results.iter().filter(|r| r.is_some()).count();
         progress.on_step_complete("OCR", &format!("{}/{} pages", success_count, results.len()));
         Ok(results)

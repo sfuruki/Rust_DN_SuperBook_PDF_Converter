@@ -26,12 +26,11 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc; // 🚀 Arc を追加（DIに必須）
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use thiserror::Error;
-
-// crate::ai_bridge から必要なものをまとめてインポート
-use crate::ai_bridge::{AiBridge, AiBridgeError, AiTool, SubprocessBridge};
+use async_trait::async_trait;
+use crate::ai_bridge::{AiBridge, AiBridgeError, AiTool, AiTaskResult};
 
 // ============================================================
 // Constants
@@ -303,88 +302,46 @@ pub struct BatchOcrResult {
 
 /// YomiToku OCR processor
 pub struct YomiToku {
+    /// 🚀 修正: SubprocessBridge への直接依存を排除し、トレイトオブジェクトを使用
     bridge: Arc<dyn AiBridge>,
 }
 
 impl YomiToku {
-    /// Create a new YomiToku processor
-    pub fn new(bridge: SubprocessBridge) -> Self {
+    /// 🚀 修正: 引数の型を Arc<dyn AiBridge> に変更 (DI対応)
+    pub fn new(bridge: Arc<dyn AiBridge>) -> Self {
         Self { bridge }
     }
-    /// Perform OCR on a single image
-    /// Check if YomiToku is available
+
+    /// YomiTokuが利用可能かチェック
     pub async fn is_available(&self) -> bool {
         self.bridge.check_tool(AiTool::YomiToku).await.unwrap_or(false)
     }
 
-    /// Perform OCR on a single image
+    /// 単一画像のOCR処理 (非同期)
     pub async fn ocr(&self, input_path: &Path, options: &YomiTokuOptions) -> Result<OcrResult> {
-        let start_time = std::time::Instant::now();
-
+        let start_time = Instant::now();
         if !input_path.exists() {
             return Err(YomiTokuError::InputNotFound(input_path.to_path_buf()));
         }
 
-//        // Get bridge script path
-//        let bridge_dir = self
-//            .bridge
-//            .config()
-//            .venv_path
-//            .parent()
-//            .unwrap_or(Path::new("."));
-//        let bridge_script = bridge_dir.join("yomitoku_bridge.py");
-//
-//        if !bridge_script.exists() {
-//            return Err(YomiTokuError::ExecutionFailed(format!(
-//                "Bridge script not found: {}",
-//                bridge_script.display()
-//            )));
-//        }
-// --- 書き換え箇所: 独自のパス構築を削除し、共通ロジックを呼び出す ---
-        // Get bridge script path 
-        
-        let bridge_script = crate::ai_bridge::resolve_bridge_script(AiTool::YomiToku, self.bridge.config())
-        .map_err(|e| YomiTokuError::ExecutionFailed(e.to_string()))?;
-        
-        // Build command arguments for bridge script
-        let mut args = vec![
-            bridge_script.to_string_lossy().to_string(),
-            input_path.to_string_lossy().to_string(),
-            "--format".to_string(),
-            "json".to_string(),
-        ];
-
-        if options.use_gpu {
-            args.push("--gpu".to_string());
-            if let Some(gpu_id) = options.gpu_id {
-                args.push(gpu_id.to_string());
-            } else {
-                args.push("0".to_string());
-            }
-        } else {
-            args.push("--no-gpu".to_string());
-        }
-
-        args.push("--confidence".to_string());
-        args.push(options.confidence_threshold.to_string());
-
-        // Execute YomiToku via bridge
-        // We need a temporary output directory for the bridge to write results
+        // 🚀 修正: 一時ディレクトリの作成 (ゼロコピー転送の結果受け取り用)
         let temp_output_dir = std::env::temp_dir().join(format!("yomitoku_{}", std::process::id()));
         std::fs::create_dir_all(&temp_output_dir)
             .map_err(|e| YomiTokuError::ExecutionFailed(format!("Failed to create temp dir: {}", e)))?;
 
+        // AIブリッジ経由で実行 (HTTPモードまたはサブプロセスモード)
+        // 🚀 修正: .await を追加し、結果を非同期で待機
         let result = self.bridge.execute(
             AiTool::YomiToku,
             &[input_path.to_path_buf()],
             &temp_output_dir,
-            options, // オプションを渡す。HttpApiBridgeの実装側でURLを構築する。
-        ).await.map_err(|e| YomiTokuError::ExecutionFailed(e.to_string()))?;
+            options,
+        ).await.map_err(YomiTokuError::BridgeError)?;
 
-        // Get the output from the first processed file
-        let output = if let Some(processed_file) = result.processed_files.first() {
-            // For now, we'll need to read the output file or modify the bridge to return output
-            // This is a temporary solution - ideally the bridge should return the output directly
+        // 実行結果から出力を取得
+        let output_json = if let Some(processed_file) = result.processed_files.first() {
+            // ブリッジ側が保存したJSONの結果を読み込む
+            // (HttpApiBridgeの実装に合わせて調整が必要な場合があります)
             std::fs::read_to_string(processed_file)
                 .map_err(|e| YomiTokuError::ExecutionFailed(format!("Failed to read output: {}", e)))?
         } else if let Some((_, error)) = result.failed_files.first() {
@@ -393,30 +350,20 @@ impl YomiToku {
             return Err(YomiTokuError::ExecutionFailed("No output from bridge".to_string()));
         };
 
-        // Clean up temp directory
+        // 一時ディレクトリのクリーンアップ
         let _ = std::fs::remove_dir_all(&temp_output_dir);
 
-        // Parse JSON output from bridge
-        let json_result: serde_json::Value = serde_json::from_str(&output).map_err(|e| {
-            YomiTokuError::ExecutionFailed(format!(
-                "Failed to parse output: {} (raw: {})",
-                e, output
-            ))
-        })?;
+        // JSONをパース
+        let json_result: serde_json::Value = serde_json::from_str(&output_json)
+            .map_err(|e| YomiTokuError::ExecutionFailed(format!("Parse error: {}", e)))?;
 
-        // Check for error in response
         if let Some(error) = json_result.get("error") {
-            return Err(YomiTokuError::ExecutionFailed(
-                error.as_str().unwrap_or("Unknown error").to_string(),
-            ));
+            return Err(YomiTokuError::ExecutionFailed(error.as_str().unwrap_or("Unknown error").into()));
         }
 
-        // Extract text blocks from bridge output format
         let text_blocks = self.parse_bridge_output(&json_result)?;
-        let overall_confidence = json_result
-            .get("confidence")
-            .and_then(|c| c.as_f64())
-            .unwrap_or(0.0) as f32;
+        let overall_confidence = json_result.get("confidence").and_then(|c| c.as_f64()).unwrap_or(0.0) as f32;
+        
         let text_direction = match json_result.get("text_direction").and_then(|d| d.as_str()) {
             Some("vertical") => TextDirection::Vertical,
             Some("horizontal") => TextDirection::Horizontal,
@@ -433,25 +380,27 @@ impl YomiToku {
         })
     }
 
-    /// Perform OCR on multiple images
-    pub fn ocr_batch(
+    /// 🚀 修正: バッチOCR処理を非同期化 (async fn)
+    pub async fn ocr_batch(
         &self,
         input_files: &[PathBuf],
         options: &YomiTokuOptions,
-        progress: Option<Box<dyn Fn(usize, usize) + Send>>,
+        progress: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
     ) -> Result<BatchOcrResult> {
-        let start_time = std::time::Instant::now();
+        let start_time = Instant::now();
         let mut successful = Vec::new();
         let mut failed = Vec::new();
 
         for (i, input_path) in input_files.iter().enumerate() {
-            if let Some(ref progress_fn) = progress {
-                progress_fn(i + 1, input_files.len());
-            }
-
-            match self.ocr(input_path, options) {
+            // 🚀 修正: 内部の ocr 呼び出しに .await を追加
+            // これによりエラー E0308 (expected enum Result, found future) が解消されます
+            match self.ocr(input_path, options).await {
                 Ok(result) => successful.push(result),
                 Err(e) => failed.push((input_path.clone(), e.to_string())),
+            }
+
+            if let Some(ref progress_fn) = progress {
+                progress_fn(i + 1, input_files.len());
             }
         }
 
