@@ -463,7 +463,7 @@ impl RealEsrgan {
 
         for (i, input_path) in input_files.iter().enumerate() {
             let output_path = output_dir.join(format!(
-                "{}_upscaled.png",
+                "{}{}x.png",
                 input_path.file_stem().unwrap().to_string_lossy()
             ));
 
