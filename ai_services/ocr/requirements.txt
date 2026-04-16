@@ -1,7 +1,11 @@
-# OCR Service Dependencies
+--extra-index-url https://download.pytorch.org/whl/cu121
 torch>=2.0.0
 yomitoku>=0.6.0
 opencv-python>=4.8.0
 numpy<2.0.0
 fastapi
 uvicorn
+pydantic>=2.9.2
+shapely>=2.0.6
+omegaconf>=2.3.0
+lxml>=5.3.0
