@@ -294,7 +294,7 @@ def main():
 
         for img_file in sorted(input_path.iterdir()):
             if img_file.suffix.lower() in image_extensions:
-                out_file = output_path / f"{img_file.stem}_upscaled{img_file.suffix}"
+                out_file = output_path / f"{img_file.stem}{args.scale}x.png"
                 result = upscale_image(
                     img_file,
                     out_file,
