@@ -620,8 +620,9 @@ impl SubprocessBridge {
             // Generate output filename based on input
             let output_filename = format!(
                 "{}{}x.png",
-                input_file.file_stem().unwrap_or_default().to_string_lossy(),"2"
-                input_file.extension().unwrap_or_default().to_string_lossy()
+                input_file.file_stem().unwrap_or_default().to_string_lossy(),
+                "2", // デフォルトは2倍で、必要に応じて tool_options から scale を取得して置き換えることもできます
+                // input_file.extension().unwrap_or_default().to_string_lossy() は不要なので削除
             );
             let output_path = output_dir.join(&output_filename);
 
