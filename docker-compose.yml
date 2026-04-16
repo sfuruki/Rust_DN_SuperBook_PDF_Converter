@@ -68,7 +68,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
-      - ./data/work:/data/work:rw
+      - ./data:/data:rw
       - ai-cache:/root/.cache
     networks:
       - superbook-net
@@ -94,7 +94,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
-      - ./data/work:/data/work:rw
+      - ./data:/data:rw
       - ai-cache:/root/.cache
     networks:
       - superbook-net
