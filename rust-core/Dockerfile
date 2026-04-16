@@ -52,6 +52,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# 🚀 以下の行を追加して、ImageMagick の PDF 制限を解除します
+RUN sed -i 's/rights="none" pattern="PDF"/rights="read|write" pattern="PDF"/' /etc/ImageMagick-6/policy.xml
+
 # アプリケーションディレクトリの設定
 WORKDIR /app
 
