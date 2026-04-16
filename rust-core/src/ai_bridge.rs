@@ -619,8 +619,8 @@ impl SubprocessBridge {
 
             // Generate output filename based on input
             let output_filename = format!(
-                "{}_upscaled.{}",
-                input_file.file_stem().unwrap_or_default().to_string_lossy(),
+                "{}{}x.png",
+                input_file.file_stem().unwrap_or_default().to_string_lossy(),"2"
                 input_file.extension().unwrap_or_default().to_string_lossy()
             );
             let output_path = output_dir.join(&output_filename);
