@@ -136,20 +136,20 @@ impl ProgressCallback for VerboseProgress {
 fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
-    // Validate input path
+    // 入力パスのバリデーション [3]
     if !args.input.exists() {
         eprintln!("Error: Input path does not exist: {}", args.input.display());
         std::process::exit(exit_codes::INPUT_NOT_FOUND);
     }
 
-    // Collect PDF files to process
+    // 処理対象のPDFファイルを収集 [3, 4]
     let pdf_files = collect_pdf_files(&args.input)?;
     if pdf_files.is_empty() {
         eprintln!("Error: No PDF files found in input path");
         std::process::exit(exit_codes::INPUT_NOT_FOUND);
     }
 
-    // Load config file if specified, otherwise use default
+    // 設定ファイルの読み込み [3]
     let file_config = match &args.config {
         Some(config_path) => match Config::load_from_path(config_path) {
             Ok(cfg) => cfg,
@@ -161,107 +161,103 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
         None => Config::load().unwrap_or_default(),
     };
 
-    // Create CLI overrides from command-line arguments
+    // CLI引数による上書き設定の適用 [3, 5]
     let cli_overrides = create_cli_overrides(args);
-
-    // Merge config file with CLI arguments (CLI takes precedence)
     let pipeline_config = file_config.merge_with_cli(&cli_overrides);
     let pipeline = PdfPipeline::new(pipeline_config);
 
+    // ドライラン（実行計画の表示）モード [3, 4]
     if args.dry_run {
         print_execution_plan(args, &pdf_files, pipeline.config());
         return Ok(());
     }
 
-    // Create output directory
+    // 出力ディレクトリの作成
     std::fs::create_dir_all(&args.output)?;
-
     let verbose = args.verbose > 0;
-
-    // Create progress callback
     let progress = VerboseProgress::new(args.verbose.into());
-
-    // Pre-compute options JSON for caching
     let options_json = pipeline.config().to_json();
 
-    // Track processing results
+    // 処理結果のカウント用変数
     let mut ok_count = 0usize;
     let mut skip_count = 0usize;
     let mut error_count = 0usize;
 
-    // Process each PDF file
-    for (idx, pdf_path) in pdf_files.iter().enumerate() {
-        let output_pdf = pipeline.get_output_path(pdf_path, &args.output);
+    // 🚀 修正ポイント: Tokio ランタイムを作成し、その中で非同期通信を伴うパイプラインを実行する
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        for (idx, pdf_path) in pdf_files.iter().enumerate() {
+            let output_pdf = pipeline.get_output_path(pdf_path, &args.output);
 
-        // Check cache for smart skipping
-        if args.skip_existing && !args.force {
-            if output_pdf.exists() {
-                if verbose {
-                    println!(
-                        "[{}/{}] Skipping (exists): {}",
-                        idx + 1,
-                        pdf_files.len(),
-                        pdf_path.display()
-                    );
+            // キャッシュによるスキップ判定 [3]
+            if args.skip_existing && !args.force {
+                if output_pdf.exists() {
+                    if verbose {
+                        println!(
+                            "[{}/{}] Skipping (exists): {}",
+                            idx + 1,
+                            pdf_files.len(),
+                            pdf_path.display()
+                        );
+                    }
+                    skip_count += 1;
+                    continue;
                 }
-                skip_count += 1;
-                continue;
+            } else if !args.force {
+                if let Some(cache) = should_skip_processing(pdf_path, &output_pdf, &options_json, false) {
+                    if verbose {
+                        println!(
+                            "[{}/{}] Skipping (cached, {} pages): {}",
+                            idx + 1,
+                            pdf_files.len(),
+                            cache.result.page_count,
+                            pdf_path.display()
+                        );
+                    }
+                    skip_count += 1;
+                    continue;
+                }
             }
-        } else if !args.force {
-            if let Some(cache) = should_skip_processing(pdf_path, &output_pdf, &options_json, false)
-            {
-                if verbose {
-                    println!(
-                        "[{}/{}] Skipping (cached, {} pages): {}",
-                        idx + 1,
-                        pdf_files.len(),
-                        cache.result.page_count,
-                        pdf_path.display()
-                    );
+
+            if verbose {
+                println!(
+                    "[{}/{}] Processing: {}",
+                    idx + 1,
+                    pdf_files.len(),
+                    pdf_path.display()
+                );
+            }
+
+            // パイプライン処理の実行 [3, 6]
+            // 注: 内部で HTTP リクエストが発生するため、この block_on 内で実行される必要があります
+            match pipeline.process_with_progress(pdf_path, &args.output, &progress) {
+                Ok(result) => {
+                    ok_count += 1;
+                    // 処理成功後のキャッシュ保存 [3]
+                    if let Ok(digest) = CacheDigest::new(pdf_path, &options_json) {
+                        let cache_result = result.to_cache_result();
+                        let cache = ProcessingCache::new(digest, cache_result);
+                        let _ = cache.save(&output_pdf);
+                    }
+                    if verbose {
+                        println!(
+                            " Completed: {} pages, {:.2}s, {} bytes",
+                            result.page_count, result.elapsed_seconds, result.output_size
+                        );
+                    }
                 }
-                skip_count += 1;
-                continue;
+                Err(e) => {
+                    eprintln!("Error processing {}: {}", pdf_path.display(), e);
+                    error_count += 1;
+                }
             }
         }
-
-        if verbose {
-            println!(
-                "[{}/{}] Processing: {}",
-                idx + 1,
-                pdf_files.len(),
-                pdf_path.display()
-            );
-        }
-
-        // Process using pipeline
-        match pipeline.process_with_progress(pdf_path, &args.output, &progress) {
-            Ok(result) => {
-                ok_count += 1;
-
-                // Save cache after successful processing
-                if let Ok(digest) = CacheDigest::new(pdf_path, &options_json) {
-                    let cache_result = result.to_cache_result();
-                    let cache = ProcessingCache::new(digest, cache_result);
-                    let _ = cache.save(&output_pdf);
-                }
-
-                if verbose {
-                    println!(
-                        "    Completed: {} pages, {:.2}s, {} bytes",
-                        result.page_count, result.elapsed_seconds, result.output_size
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("Error processing {}: {}", pdf_path.display(), e);
-                error_count += 1;
-            }
-        }
-    }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
 
     let elapsed = start_time.elapsed();
 
-    // Print summary
+    // 処理結果のサマリー表示 [3]
     if !args.quiet {
         ProgressTracker::print_summary(pdf_files.len(), ok_count, skip_count, error_count);
         println!("Total time: {:.2}s", elapsed.as_secs_f64());
