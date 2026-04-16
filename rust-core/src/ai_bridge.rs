@@ -972,9 +972,11 @@ impl AiBridge for HttpApiBridge {
                     
                     let payload = UpscaleRequest {
                         input_path: input_file.to_string_lossy().to_string(),
+                        // 🚀 修正: ファイル名形式を "{元ファイル名}{倍率}x.png" に変更します
                         output_path: output_dir.join(format!(
-                            "{}_upscaled.png", 
-                            input_file.file_stem().unwrap().to_string_lossy()
+                            "{}{}x.png", 
+                            input_file.file_stem().unwrap().to_string_lossy(),
+                            opts.scale // 🚀 scale (2 または 4) をファイル名に含めます
                         )).to_string_lossy().to_string(),
                         scale: opts.scale,
                         tile: opts.tile_size,
