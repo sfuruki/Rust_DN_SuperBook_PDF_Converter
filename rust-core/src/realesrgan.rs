@@ -464,7 +464,8 @@ impl RealEsrgan {
         for (i, input_path) in input_files.iter().enumerate() {
             let output_path = output_dir.join(format!(
                 "{}{}x.png",
-                input_path.file_stem().unwrap().to_string_lossy()
+                input_path.file_stem().unwrap().to_string_lossy(),
+                options.scale
             ));
 
             // 🚀 修正: upscale() は非同期関数なので .await を追加
