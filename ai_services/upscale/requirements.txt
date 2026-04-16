@@ -1,8 +1,5 @@
---extra-index-url https://download.pytorch.org/whl/cu118
-torch==2.0.1+cu118
-torchvision==0.15.2+cu118
-numpy<2.0.0
+numpy<2
 opencv-python
-realesrgan
 fastapi
 uvicorn
+# basicsr と realesrgan は Dockerfile 側で個別インストールします
