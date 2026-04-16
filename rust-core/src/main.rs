@@ -7,6 +7,7 @@ use futures::executor::block_on;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
+use tokio; 
 use superbook_pdf::{
     exit_codes,
     should_skip_processing,

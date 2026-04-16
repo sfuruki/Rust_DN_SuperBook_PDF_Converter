@@ -56,7 +56,7 @@ dirs = "6"
 
 # Web server (optional)
 axum = { version = "0.8", features = ["multipart", "ws"], optional = true }
-tokio = { version = "1", features = ["full"], optional = true }
+tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", features = ["fs", "cors", "limit"], optional = true }
 uuid = { version = "1", features = ["v4", "serde"], optional = true }
@@ -81,7 +81,7 @@ serde_json = "1.0"
 
 [features]
 default = []
-web = ["axum", "tokio", "tower", "tower-http", "uuid", "rust-embed", "dashmap"]
+web = ["axum", "tower", "tower-http", "uuid", "rust-embed", "dashmap"]
 
 [dev-dependencies]
 tempfile = "3"
