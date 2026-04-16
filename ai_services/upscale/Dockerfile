@@ -12,8 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 依存関係のインストール
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir wheel setuptools && \
-    pip3 install --no-cache-dir -r requirements.txt && \
-    pip3 install --no-cache-dir basicsr==1.4.2 --no-deps
+    pip3 install --no-cache-dir -r requirements.txt
+
+# BASICSR_EXT=True を設定することで、一部のビルドチェックをバイパスできる場合があります
+RUN BASICSR_EXT=True pip3 install --no-cache-dir basicsr==1.4.2 --no-deps
 
 # ソースコードのコピー
 COPY . .
