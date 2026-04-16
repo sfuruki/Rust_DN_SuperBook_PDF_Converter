@@ -414,24 +414,9 @@ impl RealEsrgan {
 
         // 実行結果の成否を確認
         if !result.failed_files.is_empty() {
-            // .first() を使って「最初の要素」を取り出す（ と同じ意味です）
             if let Some((_, error)) = result.failed_files.first() {
                 return Err(RealEsrganError::ProcessingFailed(error.clone()));
             }
-        }
-        // ブリッジ（HTTP API または サブプロセス）の出力命名規則に合わせて生成ファイルを特定 [3, 4]
-        // 通常は {input_stem}_upscaled.{ext} という名前で保存される
-        let bridge_output = output_dir.join(format!(
-            "{}_upscaled.{}",
-            input_path.file_stem().unwrap_or_default().to_string_lossy(),
-            input_path.extension().unwrap_or_default().to_string_lossy()
-        ));
-
-        // ユーザーが指定した output_path と異なる場合はリネームを行う (ゼロコピー転送対応) [5]
-        if bridge_output != output_path && bridge_output.exists() {
-            std::fs::rename(&bridge_output, output_path).map_err(|e| {
-                RealEsrganError::ProcessingFailed(format!("Failed to rename output file: {}", e))
-            })?;
         }
 
         // 最終的な出力ファイルの存在を確認し、拡大後の画像サイズを取得 [6]

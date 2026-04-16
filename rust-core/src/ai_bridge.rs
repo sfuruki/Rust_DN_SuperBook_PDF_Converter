@@ -977,7 +977,7 @@ impl AiBridge for HttpApiBridge {
                             "{}{}x.png", 
                             input_file.file_stem().unwrap().to_string_lossy(),
                             opts.scale // 🚀 scale (2 または 4) をファイル名に含めます
-                        )).to_string_lossy().to_string(),
+                        )).to_string_lossy().into(),
                         scale: opts.scale,
                         tile: opts.tile_size,
                         model_name: opts.model.model_name().to_string(),
