@@ -3,11 +3,10 @@
 //! CLI entry point
 
 use clap::Parser;
-use futures::executor::block_on;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
-use tokio; 
+use superbook_pdf::ai_bridge::{AiBridge, HttpApiBridge, AiTool};
 use superbook_pdf::{
     exit_codes,
     should_skip_processing,
@@ -40,24 +39,46 @@ use superbook_pdf::{
 #[cfg(feature = "web")]
 use superbook_pdf::{ServeArgs, ServerConfig, WebServer};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
     
-    // 起動情報の表示
-    if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
+    // 🚀 構築方針に基づくモード判定（新旧両方の環境変数をチェック）
+    let is_api_mode = std::env::var("REALESRGAN_API_URL").is_ok() || std::env::var("UPSCALE_SERVICE_URL").is_ok();
+    
+    if is_api_mode {
         println!("🚀 Mode: Microservice (HTTP API)");
+        if std::env::var("REALESRGAN_API_URL").is_err() {
+            println!("  ⚠️  Warning: Legacy variable UPSCALE_SERVICE_URL detected. Please update to REALESRGAN_API_URL.");
+        }
+
+        let config = superbook_pdf::AiBridgeConfig::default();
+        if let Ok(bridge) = HttpApiBridge::new(config) {
+            println!("🔍 Initializing AI Service Handshake...");
+            // RealESRGANの確認
+            if let Ok(true) = bridge.check_tool(AiTool::RealESRGAN).await {
+                // check_tool内部で詳細ログが出力される想定
+            } else {
+                eprintln!("  ⚠️  RealESRGAN API: Connection failed or incompatible version");
+            }
+            // YomiTokuの確認
+            if let Ok(true) = bridge.check_tool(AiTool::YomiToku).await {
+            } else {
+                eprintln!("  ⚠️  YomiToku API: Connection failed or incompatible version");
+            }
+        }
     } else {
         println!("💻 Mode: Local (Subprocess)");
     }
 
     let result = match cli.command {
-        Commands::Convert(args) => run_convert(&args),
-        Commands::Markdown(args) => run_markdown(&args),
+        Commands::Convert(args) => run_convert(&args).await,
+        Commands::Markdown(args) => run_markdown(&args).await,
         Commands::Reprocess(args) => run_reprocess(&args),
         Commands::Info => run_info(),
         Commands::CacheInfo(args) => run_cache_info(&args),
         #[cfg(feature = "web")]
-        Commands::Serve(args) => run_serve(&args),
+        Commands::Serve(args) => run_serve(&args).await,
     };
 
     std::process::exit(match result {
@@ -134,7 +155,7 @@ impl ProgressCallback for VerboseProgress {
 
 // ============ Convert Command ============
 
-fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
     // 入力パスのバリデーション [3]
@@ -184,10 +205,8 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut skip_count = 0usize;
     let mut error_count = 0usize;
 
-    // 🚀 修正ポイント: Tokio ランタイムを作成し、その中で非同期通信を伴うパイプラインを実行する
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        for (idx, pdf_path) in pdf_files.iter().enumerate() {
+    // 非同期ループ内で実行
+    for (idx, pdf_path) in pdf_files.iter().enumerate() {
             let output_pdf = pipeline.get_output_path(pdf_path, &args.output);
 
             // キャッシュによるスキップ判定 [3]
@@ -231,7 +250,7 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
 
             // パイプライン処理の実行 [3, 6]
             // 注: 内部で HTTP リクエストが発生するため、この block_on 内で実行される必要があります
-            match pipeline.process_with_progress(pdf_path, &args.output, &progress) {
+            match pipeline.process_with_progress(pdf_path, &args.output, &progress).await {
                 Ok(result) => {
                     ok_count += 1;
                     // 処理成功後のキャッシュ保存 [3]
@@ -252,9 +271,7 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
                     error_count += 1;
                 }
             }
-        }
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })?;
+    }
 
     let elapsed = start_time.elapsed();
 
@@ -273,10 +290,8 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 // ============ Markdown Command ============
 
-fn run_markdown(args: &MarkdownArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_markdown(args: &MarkdownArgs) -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
-
-    // Validate input path
     if !args.input.exists() {
         eprintln!("Error: Input path does not exist: {}", args.input.display());
         std::process::exit(exit_codes::INPUT_NOT_FOUND);
@@ -300,11 +315,7 @@ fn run_markdown(args: &MarkdownArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let pipeline = MarkdownPipeline::from_args(args);
 
-    let result = block_on(async {
-        pipeline.run(&args.input, &args.output, args.resume, &progress).await
-    });
-
-    match result {
+    match pipeline.run(&args.input, &args.output, args.resume, &progress).await {
         Ok(result) => {
             let elapsed = start_time.elapsed();
 
@@ -1085,7 +1096,7 @@ fn print_reprocess_status(state: &ReprocessState) {
 // ============ Serve Command (Web Server) ============
 
 #[cfg(feature = "web")]
-fn run_serve(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_serve(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = ServerConfig::default()
         .with_port(args.port)
         .with_bind(&args.bind)
@@ -1099,13 +1110,9 @@ fn run_serve(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Default: permissive CORS is already set in ServerConfig::default()
 
-    // Create tokio runtime and run the server
-    // Note: WebServer must be created inside async context because WorkerPool spawns tasks
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let server = WebServer::with_config(config);
-        server.run().await.map_err(|e| e.to_string())
-    })?;
+    // Already inside a tokio runtime thanks to #[tokio::main]
+    let server = WebServer::with_config(config);
+    server.run().await.map_err(|e| e.to_string())?;
 
     Ok(())
 }

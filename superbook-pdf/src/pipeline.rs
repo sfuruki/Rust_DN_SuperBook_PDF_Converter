@@ -26,7 +26,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
-use futures::executor::block_on; 
 use crate::cli::ConvertArgs;
 use crate::ai_bridge::AiBridge;
 // 🚀 追加: upscale_batch メソッドを使用するためにトレイトをスコープに入れる
@@ -502,18 +501,18 @@ impl PdfPipeline {
     }
 
     /// Process a single PDF file (silent mode)
-    pub fn process(
+    pub async fn process(
         &self,
         input: &Path,
         output_dir: &Path,
     ) -> Result<PipelineResult, PipelineError> {
-        self.process_with_progress(input, output_dir, &SilentProgress)
+        self.process_with_progress(input, output_dir, &SilentProgress).await
     }
 
     /// Process a single PDF file with progress callback
     ///
     /// This is the main entry point for PDF processing.
-    pub fn process_with_progress<P: ProgressCallback>(
+    pub async fn process_with_progress<P: ProgressCallback>(
         &self,
         input: &Path,
         output_dir: &Path,
@@ -595,7 +594,7 @@ impl PdfPipeline {
 
         // Step 3: AI Upscaling (if enabled)
         if self.config.upscale {
-            current_images = self.step_upscale(&work_dir, &current_images, progress)?;
+            current_images = self.step_upscale(&work_dir, &current_images, progress).await?;
         }
 
         // Step 3.5: Deblur (after upscale, before normalization)
@@ -661,7 +660,7 @@ impl PdfPipeline {
 
         // Step 12: OCR with YomiToku (if enabled)
         let ocr_results = if self.config.ocr {
-            self.step_ocr(&current_images, progress)?
+            self.step_ocr(&current_images, progress).await?
         } else {
             vec![]
         };
@@ -1218,7 +1217,7 @@ impl PdfPipeline {
     }
 
     /// Step 5: AI Upscaling
-    fn step_upscale<P: ProgressCallback>(
+    async fn step_upscale<P: ProgressCallback>(
         &self,
         work_dir: &Path,
         images: &[PathBuf],
@@ -1230,9 +1229,8 @@ impl PdfPipeline {
 
         let bridge_config = crate::AiBridgeConfig::default();
         
-        // 🚀 修正(E0308, E0599): 明示的に Arc<dyn AiBridge> 型を指定し、
-        // unwrap ではなく map_err を使用して PipelineError に変換します。
-        let bridge: Arc<dyn AiBridge> = if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
+        // 🚀 構築方針に基づき、新環境変数 REALESRGAN_API_URL を優先して判定
+        let bridge: Arc<dyn AiBridge> = if std::env::var("REALESRGAN_API_URL").is_ok() || std::env::var("UPSCALE_SERVICE_URL").is_ok() {
             let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
                 .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?;
             Arc::new(b)
@@ -1249,9 +1247,7 @@ impl PdfPipeline {
         }
         let options = options.build();
 
-        // 🚀 修正(E0277): realesrgan.rs の修正により upscale_batch は async fn になったため、
-        // ここでの block_on 呼び出しは正しい Future を受け取るようになります。
-        match block_on(esrgan.upscale_batch(images, &upscaled_dir, &options, None)) {
+        match esrgan.upscale_batch(images, &upscaled_dir, &options, None).await {
             Ok(result) => {
                 progress.on_step_complete("超解像", &format!("{}画像", result.successful.len()));
                 Ok(result.successful.iter().map(|r| r.output_path.clone()).collect())
@@ -1590,7 +1586,7 @@ impl PdfPipeline {
     }
 
     /// Step 12: OCR with YomiToku
-    fn step_ocr<P: ProgressCallback>(
+    async fn step_ocr<P: ProgressCallback>(
         &self,
         images: &[PathBuf],
         progress: &P,
@@ -1598,8 +1594,8 @@ impl PdfPipeline {
         progress.on_step_start("Running OCR (YomiToku)...");
         let bridge_config = crate::AiBridgeConfig::default();
         
-        // 🚀 修正: upscale と同様に、DI用のブリッジ生成を型安全に行います。
-        let bridge: Arc<dyn AiBridge> = if std::env::var("OCR_SERVICE_URL").is_ok() {
+        // 🚀 構築方針に基づき、新環境変数 YOMITOKU_API_URL を優先して判定
+        let bridge: Arc<dyn AiBridge> = if std::env::var("YOMITOKU_API_URL").is_ok() || std::env::var("OCR_SERVICE_URL").is_ok() {
             let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
                 .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?;
             Arc::new(b)
@@ -1618,9 +1614,7 @@ impl PdfPipeline {
 
         let mut results = Vec::new();
         for img_path in images {
-            // 🚀 修正: yomitoku.rs の修正により ocr メソッドは async fn に変更されました。
-            // PdfPipeline 全体が同期設計のため、個別に block_on で解決します。
-            match block_on(yomitoku.ocr(img_path, &ocr_opts)) {
+            match yomitoku.ocr(img_path, &ocr_opts).await {
                 Ok(result) => results.push(Some(result)),
                 Err(e) => {
                     progress.on_debug(&format!("OCR失敗 ({}): {}", img_path.display(), e));

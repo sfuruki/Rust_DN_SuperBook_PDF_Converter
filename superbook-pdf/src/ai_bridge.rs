@@ -788,7 +788,7 @@ impl AiBridge for SubprocessBridge {
     
         match output {
             Ok(o) => Ok(o.status.success()),
-            Err(_) => Ok(false),
+            _ => Ok(false),
         }
     }
 
@@ -942,8 +942,21 @@ impl AiBridge for HttpApiBridge {
         &self.config
     }
 
-    async fn check_tool(&self, _tool: AiTool) -> Result<bool> {
-        Ok(true)
+    async fn check_tool(&self, tool: AiTool) -> Result<bool> {
+        let url = self.service_urls.get(&tool)
+            .ok_or_else(|| AiBridgeError::ProcessFailed("Service URL not configured".into()))?;
+        
+        match self.client.get(format!("{}/version", url)).timeout(Duration::from_secs(5)).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(info) = resp.json::<serde_json::Value>().await {
+                    let torch = info.get("torch_version").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let cuda = info.get("cuda_available").and_then(|v| v.as_bool()).unwrap_or(false);
+                    println!("  ✨ {} API: Version={}, CUDA={}", tool, torch, if cuda { "✅" } else { "❌" });
+                }
+                Ok(true)
+            },
+            _ => Ok(false),
+        }
     }
 
     async fn check_gpu(&self) -> Result<GpuStats> {
@@ -972,7 +985,7 @@ impl AiBridge for HttpApiBridge {
                         .ok_or_else(|| AiBridgeError::ProcessFailed("Invalid options for RealESRGAN".into()))?;
                     
                     let payload = UpscaleRequest {
-                        input_path: input_file.to_string_lossy().to_string(),
+                        input_path: input_file.to_string_lossy().into(),
                         // 🚀 修正: ファイル名形式を "{元ファイル名}{倍率}x.png" に変更します
                         output_path: output_dir.join(format!(
                             "{}{}x.png",            
@@ -1057,11 +1070,11 @@ impl HttpApiBridge {
         // docker-compose.yml 等の環境変数からURLを取得
         service_urls.insert(
             AiTool::RealESRGAN, 
-            std::env::var("UPSCALE_SERVICE_URL").unwrap_or_else(|_| "http://upscale-service:8000".into())
+            std::env::var("REALESRGAN_API_URL").unwrap_or_else(|_| "http://realesrgan-api:8000".into())
         );
         service_urls.insert(
             AiTool::YomiToku, 
-            std::env::var("OCR_SERVICE_URL").unwrap_or_else(|_| "http://ocr-service:8001".into())
+            std::env::var("YOMITOKU_API_URL").unwrap_or_else(|_| "http://yomitoku-api:8000".into())
         );
 
         Ok(Self {

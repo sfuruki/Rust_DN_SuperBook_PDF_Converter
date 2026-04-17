@@ -65,7 +65,8 @@ async def get_version():
         "torch_version": torch.__version__ if torch else "not_installed",
         "cuda_available": torch.cuda.is_available() if torch else False,
         "device": torch.cuda.get_device_name(0) if (torch and torch.cuda.is_available()) else "cpu",
-        "yomitoku_available": bridge.YOMITOKU_AVAILABLE
+        "yomitoku_available": bridge.YOMITOKU_AVAILABLE,
+        "vram_total_gb": torch.cuda.get_device_properties(0).total_memory / 1e9 if (torch and torch.cuda.is_available()) else 0
     }
 
 @app.post("/ocr")
@@ -96,11 +97,20 @@ async def perform_ocr(req: OcrRequest):
             formatted_text = bridge.format_output(result, req.format)
             return {"raw_result": result, "formatted": formatted_text}
         
-        return result
+        # Rust Coreのパースしやすさのため、一貫したキーで返却
+        return {
+            "status": "success",
+            "text_blocks": result.get("text_blocks", []),
+            "full_text": result.get("full_text", ""),
+            "confidence": result.get("confidence", 0.0),
+            "text_direction": result.get("text_direction", "horizontal")
+        }
 
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
+            print("CRITICAL: GPU Out of Memory detected.")
             raise HTTPException(status_code=507, detail="GPU Out of Memory in OCR Service.")
+        print(f"Runtime Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -108,5 +118,5 @@ async def perform_ocr(req: OcrRequest):
 if __name__ == "__main__":
     import uvicorn
     # コンテナ内待受のため 0.0.0.0 を使用
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
     

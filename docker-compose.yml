@@ -4,7 +4,7 @@ services:
   # =============================================================
   # 1. Frontend: Web UI (Nginx)
   # =============================================================
-  web-ui:
+  frontend:
     build:
       context: ./web_ui
       dockerfile: Dockerfile
@@ -12,7 +12,7 @@ services:
     container_name: superbook-web-ui
     restart: unless-stopped
     depends_on:
-      rust-core:
+      rust-core-stable:
         condition: service_healthy
     ports:
       - "${SUPERBOOK_PORT:-8080}:80"
@@ -22,19 +22,24 @@ services:
   # =============================================================
   # 2. Orchestrator: Rust Core
   # =============================================================
-  rust-core:
+  rust-core-stable:
     build:
-      context: ./rust-core
+      context: ./superbook-pdf
       dockerfile: Dockerfile
     image: superbook-rust-core:latest
     container_name: superbook-rust-core
     restart: unless-stopped
+    depends_on:
+      realesrgan-api:
+        condition: service_healthy
+      yomitoku-api:
+        condition: service_healthy
     environment:
       - RUST_LOG=info
       - SUPERBOOK_WORK_DIR=/data/work
       # マイクロサービス間の通信用URL
-      - UPSCALE_SERVICE_URL=http://upscale-service:8000
-      - OCR_SERVICE_URL=http://ocr-service:8001
+      - REALESRGAN_API_URL=http://realesrgan-api:8000
+      - YOMITOKU_API_URL=http://yomitoku-api:8000
     volumes:
       - ./data/input:/data/input:ro
       - ./data/output:/data/output:rw
@@ -50,10 +55,9 @@ services:
   # =============================================================
   # 3. AI Service: Upscale (RealESRGAN / Torch 1.x)
   # =============================================================
-  upscale-service:
+  realesrgan-api:
     build:
-      context: ./ai_services/upscale
-      dockerfile: Dockerfile
+      context: ./ai_services/realesrgan
     image: superbook-upscale:latest
     container_name: superbook-upscale
     restart: unless-stopped
@@ -72,14 +76,19 @@ services:
       - ai-cache:/root/.cache
     networks:
       - superbook-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # =============================================================
   # 4. AI Service: OCR (YomiToku / Torch 2.x)
   # =============================================================
-  ocr-service:
+  yomitoku-api:
     build:
-      context: ./ai_services/ocr
-      dockerfile: Dockerfile
+      context: ./ai_services/yomitoku
     image: superbook-ocr:latest
     container_name: superbook-ocr
     restart: unless-stopped
@@ -98,6 +107,12 @@ services:
       - ai-cache:/root/.cache
     networks:
       - superbook-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 networks:
   superbook-net:

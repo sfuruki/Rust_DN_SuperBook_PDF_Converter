@@ -31,7 +31,7 @@ FROM docker.io/debian:bookworm-slim
 
 LABEL maintainer="superbook-pdf"
 LABEL description="SuperBook Core Orchestrator (Rust)"
-LABEL component="rust-core"
+LABEL component="superbook-pdf"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Tokyo

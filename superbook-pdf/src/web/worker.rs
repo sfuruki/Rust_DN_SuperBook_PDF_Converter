@@ -182,16 +182,11 @@ impl JobWorker {
         // Create progress callback
         let progress = WebProgressCallback::new(job_id, self.queue.clone());
 
-        // Run pipeline in blocking task (pipeline uses rayon internally)
-        let queue = self.queue.clone();
-        let broadcaster = self.broadcaster.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            pipeline.process_with_progress(&input_path, &output_dir, &progress)
-        })
-        .await;
+        // Run pipeline directly (it handles its own async/blocking balance)
+        let result = pipeline.process_with_progress(&input_path, &output_dir, &progress).await;
 
         match result {
-            Ok(Ok(pipeline_result)) => {
+            Ok(pipeline_result) => {
                 // Pipeline succeeded
                 let page_count = pipeline_result.page_count;
                 let elapsed = pipeline_result.elapsed_seconds;
@@ -203,21 +198,13 @@ impl JobWorker {
                     .broadcast_completed(job_id, elapsed, page_count)
                     .await;
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 // Pipeline error
                 let error_msg = format!("Pipeline error: {}", e);
-                queue.update(job_id, |job| {
+                self.queue.update(job_id, |job| {
                     job.fail(error_msg.clone());
                 });
-                broadcaster.broadcast_error(job_id, &error_msg).await;
-            }
-            Err(e) => {
-                // Task panic
-                let error_msg = format!("Task panic: {}", e);
-                queue.update(job_id, |job| {
-                    job.fail(error_msg.clone());
-                });
-                broadcaster.broadcast_error(job_id, &error_msg).await;
+                self.broadcaster.broadcast_error(job_id, &error_msg).await;
             }
         }
     }

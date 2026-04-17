@@ -273,7 +273,7 @@ impl MarkdownPipeline {
         // Setup YomiToku (graceful fallback if venv unavailable)
         //let venv_path = crate::resolve_venv_path();
         let bridge_config = crate::AiBridgeConfig::default();
-        let bridge: Arc<dyn AiBridge> = if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
+        let bridge: Arc<dyn AiBridge> = if std::env::var("YOMITOKU_API_URL").is_ok() || std::env::var("OCR_SERVICE_URL").is_ok() {
             let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
                 .map_err(|e| MarkdownPipelineError::OcrError(e.to_string()))?;
             Arc::new(b)
@@ -584,7 +584,7 @@ impl MarkdownPipeline {
     ) -> Result<Vec<PathBuf>, MarkdownPipelineError> {
         // 🚀 修正: メソッド自体を async fn に変更し、内部でも DI を適用
         let bridge_config = crate::AiBridgeConfig::default();
-        let bridge: Arc<dyn AiBridge> = if std::env::var("UPSCALE_SERVICE_URL").is_ok() {
+        let bridge: Arc<dyn AiBridge> = if std::env::var("REALESRGAN_API_URL").is_ok() || std::env::var("UPSCALE_SERVICE_URL").is_ok() {
             let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
                 .map_err(|e| MarkdownPipelineError::Pipeline(PipelineError::ImageProcessingFailed(e.to_string())))?;
             Arc::new(b)

@@ -1,8 +1,8 @@
-# ai_services/upscale/Dockerfile
+# ai_services/realesrgan/Dockerfile
 
 FROM docker.io/nvidia/cuda:11.8.0-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
-WORKDIR /app
+WORKDIR /app/realesrgan
 
 # 1. システム依存パッケージのインストール [4, 8]
 RUN apt-get update && apt-get install -y --no-install-recommends \
