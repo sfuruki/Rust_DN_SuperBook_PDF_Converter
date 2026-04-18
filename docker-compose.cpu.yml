@@ -11,7 +11,7 @@ services:
     # CPU専用Dockerfileでビルド
     build:
       context: ./superbook-pdf
-      dockerfile: docker/backend/Dockerfile.cpu
+      dockerfile: ../docker/backend/Dockerfile.cpu
 
     image: superbook-rust-core-cpu:latest
 

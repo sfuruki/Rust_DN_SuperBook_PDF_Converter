@@ -14,7 +14,7 @@ services:
   rust-core-stable:
     build:
       context: ./superbook-pdf
-      dockerfile: docker/backend/Dockerfile.rocm
+      dockerfile: ../docker/backend/Dockerfile.rocm
     image: superbook-rust-core-rocm:latest
 
     # GPU設定を削除（NVIDIA用）
