@@ -67,25 +67,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- ここに追加：PDFの読み書きを許可するポリシー変更 ---
 RUN sed -i 's/rights="none" pattern="PDF"/rights="read|write" pattern="PDF"/g' /etc/ImageMagick-6/policy.xml
 
-# Install uv (fast Python package manager)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
-
 # Create app directory
 WORKDIR /app
 
 # Copy Rust binary from builder
 COPY --from=builder /build/target/release/superbook-pdf /usr/local/bin/
-COPY ai_bridge/*.py /app/
-
-# Setup Python virtual environment for AI tools
-ENV AI_VENV=/app/ai_venv
-RUN uv venv $AI_VENV --python python3.10 \
-    && VIRTUAL_ENV=$AI_VENV uv pip install realesrgan yomitoku \
-    && VIRTUAL_ENV=$AI_VENV uv pip install --force-reinstall \
-        torch==2.0.1+cu118 torchvision==0.15.2+cu118 \
-        --index-url https://download.pytorch.org/whl/cu118 \
-    && VIRTUAL_ENV=$AI_VENV uv pip install "numpy<2"
 
 # Create data directories
 RUN mkdir -p /data/input /data/output /data/work
@@ -93,7 +79,6 @@ RUN mkdir -p /data/input /data/output /data/work
 # Environment
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
-ENV SUPERBOOK_VENV=$AI_VENV
 
 # API server configuration
 ENV SUPERBOOK_BIND=0.0.0.0

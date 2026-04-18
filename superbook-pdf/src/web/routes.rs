@@ -349,7 +349,7 @@ async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse
     })
 }
 
-/// Check if a Python module is available (used in non-HTTP/subprocess mode)
+/// Check if a Python module is available in the current runtime image.
 #[allow(dead_code)]
 fn check_python_module(module: &str) -> bool {
     // Check if python3 exists

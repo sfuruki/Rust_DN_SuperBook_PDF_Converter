@@ -251,27 +251,7 @@ cargo build --release --features web
 
 ### 3. AI機能のセットアップ (任意)
 
-> Docker/Podman を使う場合はこの手順は不要です。
-
-```bash
-cd superbook-pdf/ai_bridge
-
-# Python 仮想環境を作成
-python3 -m venv .venv
-source .venv/bin/activate
-
-# GPU版 PyTorch をインストール
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# AI依存パッケージをインストール
-pip install -r requirements.txt
-```
-
-実行時に環境変数を設定:
-
-```bash
-export SUPERBOOK_VENV=/path/to/ai_bridge/.venv
-```
+現在の AI 機能はマイクロサービス構成です。ローカル venv の手動セットアップは不要で、Docker/Podman から AI サービスを起動します。
 
 ### 4. Docker/Podman で実行 (推奨)
 
@@ -319,7 +299,7 @@ superbook-pdf serve --port 8080 --bind 0.0.0.0
 | 問題 | 解決策 |
 |------|--------|
 | `pdftoppm: command not found` | `sudo apt install poppler-utils` |
-| RealESRGAN が動かない | `SUPERBOOK_VENV` 環境変数を設定 |
+| RealESRGAN が動かない | `docker compose ps` と `superbook-pdf info` で AI Services の状態を確認 |
 | GPU が使用されない | `pip install torch --index-url https://download.pytorch.org/whl/cu121` |
 | メモリ不足 | `--max-pages 10` か `--chunk-size 5` で分割処理 |
 | 傾き補正で画像が崩れる | `--no-deskew` で無効化 |

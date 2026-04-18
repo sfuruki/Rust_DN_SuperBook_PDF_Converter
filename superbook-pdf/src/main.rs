@@ -42,33 +42,19 @@ use superbook_pdf::{ServeArgs, ServerConfig, WebServer};
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    
-    // 🚀 構築方針に基づくモード判定（新旧両方の環境変数をチェック）
-    let is_api_mode = std::env::var("REALESRGAN_API_URL").is_ok() || std::env::var("UPSCALE_SERVICE_URL").is_ok();
-    
-    if is_api_mode {
-        println!("🚀 Mode: Microservice (HTTP API)");
-        if std::env::var("REALESRGAN_API_URL").is_err() {
-            println!("  ⚠️  Warning: Legacy variable UPSCALE_SERVICE_URL detected. Please update to REALESRGAN_API_URL.");
-        }
 
-        let config = superbook_pdf::AiBridgeConfig::default();
-        if let Ok(bridge) = HttpApiBridge::new(config) {
-            println!("🔍 Initializing AI Service Handshake...");
-            // RealESRGANの確認
-            if let Ok(true) = bridge.check_tool(AiTool::RealESRGAN).await {
-                // check_tool内部で詳細ログが出力される想定
-            } else {
-                eprintln!("  ⚠️  RealESRGAN API: Connection failed or incompatible version");
-            }
-            // YomiTokuの確認
-            if let Ok(true) = bridge.check_tool(AiTool::YomiToku).await {
-            } else {
-                eprintln!("  ⚠️  YomiToku API: Connection failed or incompatible version");
-            }
+    println!("🚀 Mode: Microservice (HTTP API)");
+    let config = superbook_pdf::AiBridgeConfig::default();
+    if let Ok(bridge) = HttpApiBridge::new(config) {
+        println!("🔍 Initializing AI Service Handshake...");
+        if let Ok(true) = bridge.check_tool(AiTool::RealESRGAN).await {
+        } else {
+            eprintln!("  ⚠️  RealESRGAN API: Connection failed or incompatible version");
         }
-    } else {
-        println!("💻 Mode: Local (Subprocess)");
+        if let Ok(true) = bridge.check_tool(AiTool::YomiToku).await {
+        } else {
+            eprintln!("  ⚠️  YomiToku API: Connection failed or incompatible version");
+        }
     }
 
     let result = match cli.command {

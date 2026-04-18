@@ -270,18 +270,11 @@ impl MarkdownPipeline {
             page_count
         ));
 
-        // Setup YomiToku (graceful fallback if venv unavailable)
-        //let venv_path = crate::resolve_venv_path();
         let bridge_config = crate::AiBridgeConfig::default();
-        let bridge: Arc<dyn AiBridge> = if std::env::var("YOMITOKU_API_URL").is_ok() || std::env::var("OCR_SERVICE_URL").is_ok() {
-            let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
-                .map_err(|e| MarkdownPipelineError::OcrError(e.to_string()))?;
-            Arc::new(b)
-        } else {
-            let b = crate::SubprocessBridge::new(bridge_config)
-                .map_err(|e| MarkdownPipelineError::OcrError(e.to_string()))?;
-            Arc::new(b)
-        };
+        let bridge: Arc<dyn AiBridge> = Arc::new(
+            crate::ai_bridge::HttpApiBridge::new(bridge_config)
+                .map_err(|e| MarkdownPipelineError::OcrError(e.to_string()))?
+        );
 
         //let esrgan = crate::RealEsrgan::new(bridge.clone());
         let yomitoku = crate::YomiToku::new(bridge);
@@ -582,17 +575,11 @@ impl MarkdownPipeline {
         images: &[PathBuf],
         progress: &P,
     ) -> Result<Vec<PathBuf>, MarkdownPipelineError> {
-        // 🚀 修正: メソッド自体を async fn に変更し、内部でも DI を適用
         let bridge_config = crate::AiBridgeConfig::default();
-        let bridge: Arc<dyn AiBridge> = if std::env::var("REALESRGAN_API_URL").is_ok() || std::env::var("UPSCALE_SERVICE_URL").is_ok() {
-            let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
-                .map_err(|e| MarkdownPipelineError::Pipeline(PipelineError::ImageProcessingFailed(e.to_string())))?;
-            Arc::new(b)
-        } else {
-            let b = crate::SubprocessBridge::new(bridge_config)
-                .map_err(|e| MarkdownPipelineError::Pipeline(PipelineError::ImageProcessingFailed(e.to_string())))?;
-            Arc::new(b)
-        };
+        let bridge: Arc<dyn AiBridge> = Arc::new(
+            crate::ai_bridge::HttpApiBridge::new(bridge_config)
+                .map_err(|e| MarkdownPipelineError::Pipeline(PipelineError::ImageProcessingFailed(e.to_string())))?
+        );
 
         let esrgan = crate::RealEsrgan::new(bridge);
         let mut options = crate::RealEsrganOptions::builder().scale(2);

@@ -109,10 +109,6 @@ superbook-pdf/
 │       ├── job.rs             # ジョブキュー
 │       ├── worker.rs          # バックグラウンドワーカー
 │       └── static/            # Web UI アセット
-├── ai_bridge/                 # Python AI モジュール
-│   ├── realesrgan_bridge.py   # RealESRGAN ブリッジ
-│   ├── yomitoku_bridge.py     # YomiToku ブリッジ
-│   └── requirements.txt
 ├── tests/                     # 統合テスト
 ├── specs/                     # TDD 仕様
 └── docker/
@@ -167,17 +163,17 @@ Pipeline 実行
 - `Default` trait でデフォルト値を定義
 - CLI 引数でオーバーライド
 
-### Python ブリッジ
+### AI サービス連携
 
-AI 機能 (RealESRGAN, YomiToku) は Python スクリプトをサブプロセスとして呼び出します:
+AI 機能 (RealESRGAN, YomiToku) は HTTP マイクロサービスとして分離されています:
 
 ```
-Rust (realesrgan.rs) → subprocess → Python (realesrgan_bridge.py) → RealESRGAN
+Rust Core → HTTP API → AI Services (RealESRGAN / YomiToku)
 ```
 
-- `SUPERBOOK_VENV` で指定された venv 内の Python を使用
-- 標準入出力で通信
-- エラー時はフォールバック (元画像を使用)
+- Rust Core は HTTP で `/version`, `/upscale`, `/ocr` を呼び出します
+- Python / Torch のバージョン差異は各サービスコンテナで独立管理します
+- `superbook-pdf info` でサービス単位の状態確認ができます
 
 ### Feature Flags
 

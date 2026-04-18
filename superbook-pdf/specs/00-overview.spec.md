@@ -47,7 +47,7 @@ superbook-pdf は、スキャンされた書籍PDFを高品質なデジタル書
 | Finalize | finalize.rs | 最終出力処理・リサイズ |
 | RealESRGAN | realesrgan.rs | AI画像鮮明化 (Python連携) |
 | YomiToku | yomitoku.rs | 日本語OCR (Python連携) |
-| AI Bridge | ai_bridge.rs | Python subprocess管理 |
+| AI Bridge | ai_bridge.rs | HTTP API-based communication with AI containers |
 | Reprocess | reprocess.rs | 部分再処理・失敗ページリトライ |
 | Util | util.rs | ユーティリティ関数 |
 

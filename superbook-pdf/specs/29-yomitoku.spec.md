@@ -1,9 +1,13 @@
 # 29-yomitoku.spec.md - YomiToku Japanese AI-OCR Specification
 
+⚠️ **DEPRECATED**: This specification is based on the legacy subprocess architecture.
+The current implementation uses HTTP API (see src/yomitoku.rs).
+YomiToku now runs in a dedicated container (ai_services/yomitoku/) with FastAPI.
+
 ## Overview
 
-YomiTokuは日本語AI-OCRエンジンで、スキャン画像から高精度でテキストを抽出する。
-Pythonブリッジスクリプト経由で実行され、GPU加速をサポート。
+legacy: YomiTokuは日本語AI-OCRエンジンで、Pythonブリッジスクリプト経由で実行
+**current**: HTTP-based FastAPI service communication with GPU acceleration.
 
 ---
 

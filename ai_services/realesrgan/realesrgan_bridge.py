@@ -3,7 +3,7 @@
 RealESRGAN Bridge for superbook-pdf
 
 Upscale images using Real-ESRGAN for AI-enhanced super-resolution.
-Designed to be called from Rust via subprocess.
+Backend implementation used by FastAPI HTTP service (app.py).
 
 Usage:
     python realesrgan_bridge.py -i INPUT -o OUTPUT [options]

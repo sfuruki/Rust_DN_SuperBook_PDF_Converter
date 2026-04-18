@@ -302,12 +302,10 @@ pub struct BatchOcrResult {
 
 /// YomiToku OCR processor
 pub struct YomiToku {
-    /// 🚀 修正: SubprocessBridge への直接依存を排除し、トレイトオブジェクトを使用
     bridge: Arc<dyn AiBridge>,
 }
 
 impl YomiToku {
-    /// 🚀 修正: 引数の型を Arc<dyn AiBridge> に変更 (DI対応)
     pub fn new(bridge: Arc<dyn AiBridge>) -> Self {
         Self { bridge }
     }

@@ -1229,17 +1229,10 @@ impl PdfPipeline {
         std::fs::create_dir_all(&upscaled_dir)?;
 
         let bridge_config = crate::AiBridgeConfig::default();
-        
-        // 🚀 構築方針に基づき、新環境変数 REALESRGAN_API_URL を優先して判定
-        let bridge: Arc<dyn AiBridge> = if std::env::var("REALESRGAN_API_URL").is_ok() || std::env::var("UPSCALE_SERVICE_URL").is_ok() {
-            let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
-                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?;
-            Arc::new(b)
-        } else {
-            let b = crate::SubprocessBridge::new(bridge_config)
-                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?;
-            Arc::new(b)
-        };
+        let bridge: Arc<dyn AiBridge> = Arc::new(
+            crate::ai_bridge::HttpApiBridge::new(bridge_config)
+                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?
+        );
 
         let esrgan = crate::RealEsrgan::new(bridge);
         let mut options = crate::realesrgan::RealEsrganOptions::builder().scale(2);
@@ -1635,17 +1628,10 @@ impl PdfPipeline {
     ) -> Result<Vec<Option<crate::OcrResult>>, PipelineError> {
         progress.on_step_start("Running OCR (YomiToku)...");
         let bridge_config = crate::AiBridgeConfig::default();
-        
-        // 🚀 構築方針に基づき、新環境変数 YOMITOKU_API_URL を優先して判定
-        let bridge: Arc<dyn AiBridge> = if std::env::var("YOMITOKU_API_URL").is_ok() || std::env::var("OCR_SERVICE_URL").is_ok() {
-            let b = crate::ai_bridge::HttpApiBridge::new(bridge_config)
-                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?;
-            Arc::new(b)
-        } else {
-            let b = crate::SubprocessBridge::new(bridge_config)
-                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?;
-            Arc::new(b)
-        };
+        let bridge: Arc<dyn AiBridge> = Arc::new(
+            crate::ai_bridge::HttpApiBridge::new(bridge_config)
+                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?
+        );
 
         let yomitoku = crate::YomiToku::new(bridge);
         let mut ocr_opts = crate::yomitoku::YomiTokuOptions::builder();

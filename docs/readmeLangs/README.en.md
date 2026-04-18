@@ -248,27 +248,7 @@ cargo build --release --features web
 
 ### 3. AI Feature Setup (Optional)
 
-> Not needed when using Docker/Podman.
-
-```bash
-cd superbook-pdf/ai_bridge
-
-# Create Python virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install GPU PyTorch
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# Install AI dependencies
-pip install -r requirements.txt
-```
-
-Set the environment variable at runtime:
-
-```bash
-export SUPERBOOK_VENV=/path/to/ai_bridge/.venv
-```
+AI features now run as separate microservices. Manual local venv setup is no longer required; start the AI services with Docker/Podman instead.
 
 ### 4. Run with Docker/Podman (Recommended)
 
@@ -316,7 +296,7 @@ superbook-pdf serve --port 8080 --bind 0.0.0.0
 | Problem | Solution |
 |---------|----------|
 | `pdftoppm: command not found` | `sudo apt install poppler-utils` |
-| RealESRGAN not working | Set the `SUPERBOOK_VENV` environment variable |
+| RealESRGAN not working | Check AI Services with `docker compose ps` and `superbook-pdf info` |
 | GPU not being used | `pip install torch --index-url https://download.pytorch.org/whl/cu121` |
 | Out of memory | Use `--max-pages 10` or `--chunk-size 5` for chunked processing |
 | Deskew distorts image | Disable with `--no-deskew` |

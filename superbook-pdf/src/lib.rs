@@ -12,7 +12,7 @@
 //! - **Deskew Correction** ([`deskew`]) - Detect and correct page skew
 //! - **Margin Detection** ([`margin`]) - Detect and trim page margins
 //! - **Page Number Detection** ([`page_number`]) - OCR-based page number recognition
-//! - **AI Bridge** ([`ai_bridge`]) - Python subprocess bridge for AI tools
+//! - **AI Bridge** ([`ai_bridge`]) - HTTP API bridge for AI services
 //! - **`YomiToku` OCR** ([`yomitoku`]) - Japanese AI-OCR for searchable PDFs
 //!
 //! # Quick Start
@@ -151,10 +151,7 @@ pub mod cleanup;
 pub mod markdown;
 
 // Re-exports for convenience
-pub use ai_bridge::{
-    resolve_bridge_script, AiBridgeConfig, AiBridgeConfigBuilder, AiBridgeError, AiTool,
-    SubprocessBridge,
-};
+pub use ai_bridge::{AiBridgeConfig, AiBridgeConfigBuilder, AiBridgeError, AiTool};
 #[cfg(feature = "web")]
 pub use cli::ServeArgs;
 pub use cli::{
@@ -197,7 +194,7 @@ pub use reprocess::{
 };
 pub use util::{
     clamp, ensure_dir_writable, ensure_file_exists, format_duration, format_file_size, load_image,
-    mm_to_pixels, mm_to_points, percentage, pixels_to_mm, points_to_mm, resolve_venv_path,
+    mm_to_pixels, mm_to_points, percentage, pixels_to_mm, points_to_mm,
 };
 pub use yomitoku::{
     BatchOcrResult, OcrResult, TextBlock, TextDirection, YomiToku, YomiTokuError, YomiTokuOptions,

@@ -1,9 +1,13 @@
 # 08-ai-bridge.spec.md - AI Tools Bridge Specification
 
+⚠️ **DEPRECATED**: This specification is based on the legacy subprocess architecture.
+The current implementation uses HTTP API (see src/ai_bridge.rs: `HttpApiBridge`).
+AI services (RealESRGAN, YomiToku) now communicate via FastAPI containers.
+
 ## Overview
 
-外部AIツール（Python: RealESRGAN, YomiToku等）との通信を管理するモジュール。
-subprocess/PyO3を使用してPythonプロセスを制御。
+legacy: 外部AIツール（Python: RealESRGAN, YomiToku等）との通信を管理するモジュール。
+**current**: HTTP-based async communication with separate AI service containers.
 
 ---
 

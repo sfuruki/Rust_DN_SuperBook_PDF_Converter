@@ -103,8 +103,9 @@ chunk_size = 0
 
 | 変数名 | 説明 |
 |--------|------|
-| `SUPERBOOK_VENV` | Python venv パス (AI機能に必要) |
 | `SUPERBOOK_NO_GPU` | `1` を設定すると GPU を無効化 |
+| `REALESRGAN_API_URL` | RealESRGAN サービス URL |
+| `YOMITOKU_API_URL` | YomiToku サービス URL |
 | `ANTHROPIC_API_KEY` | Claude API キー (Markdown 検証用) |
 | `OPENAI_API_KEY` | OpenAI API キー (Markdown 検証用) |
 

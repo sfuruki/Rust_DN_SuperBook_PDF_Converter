@@ -65,14 +65,14 @@ PDF の各ページを指定 DPI で PNG 画像として抽出します。
 
 ## Step 4: AI 超解像
 
-**モジュール:** `src/realesrgan.rs` → `ai_bridge/realesrgan_bridge.py`
+**モジュール:** `src/realesrgan.rs` → AI service (`ai_services/realesrgan`)
 
 RealESRGAN による 2x アップスケーリング。
 
 - モデル: RealESRGAN_x2plus (自動ダウンロード)
 - GPU 必須 (CUDA)
-- Python ブリッジ経由で実行
-- `SUPERBOOK_VENV` 環境変数でvenvパスを指定
+- HTTP API 経由で実行
+- サービス URL は `REALESRGAN_API_URL` で指定可能
 
 ## Step 5: ブレ補正
 
@@ -166,12 +166,13 @@ HSV 色空間での裏写り抑制と紙色の白化。
 
 ## Step 12: OCR
 
-**モジュール:** `src/yomitoku.rs` → `ai_bridge/yomitoku_bridge.py`
+**モジュール:** `src/yomitoku.rs` → AI service (`ai_services/yomitoku`)
 
 YomiToku による日本語 AI OCR。`--ocr` オプション指定時のみ実行。
 
 - テキストレイヤーを PDF に埋め込み
 - 検索可能 PDF を生成
+- サービス URL は `YOMITOKU_API_URL` で指定可能
 
 ---
 

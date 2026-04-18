@@ -1,10 +1,10 @@
 //! AI Tools Bridge module
 //!
-//! Provides communication with external AI tools (Python: `RealESRGAN`, `YomiToku`, etc.)
+//! Provides communication with external AI services (`RealESRGAN`, `YomiToku`).
 //!
 //! # Features
 //!
-//! - Subprocess management for Python AI tools
+//! - HTTP API communication for AI tools
 //! - GPU/CPU configuration with VRAM limits
 //! - Automatic retry on failure
 //! - Progress and timeout handling
@@ -12,7 +12,8 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use superbook_pdf::{AiBridgeConfig, SubprocessBridge, AiTool};
+//! use superbook_pdf::{AiBridgeConfig, AiTool};
+//! use superbook_pdf::ai_bridge::{AiBridge, HttpApiBridge};
 //!
 //! // Configure AI bridge
 //! let config = AiBridgeConfig::builder()
@@ -20,12 +21,12 @@
 //!     .max_retries(3)
 //!     .build();
 //!
-//! // Create bridge for RealESRGAN
-//! // let bridge = SubprocessBridge::new(AiTool::RealEsrgan, &config);
+//! // Create HTTP bridge for RealESRGAN / YomiToku services
+//! let bridge = HttpApiBridge::new(config).unwrap();
+//! let _available = futures::executor::block_on(bridge.check_tool(AiTool::RealESRGAN));
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 //use std::sync::Arc;
@@ -54,9 +55,6 @@ const DEFAULT_GPU_TILE_SIZE: u32 = 400;
 /// AI Bridge error types
 #[derive(Debug, Error)]
 pub enum AiBridgeError {
-    #[error("Python virtual environment not found: {0}")]
-    VenvNotFound(PathBuf),
-
     #[error("Tool not installed: {0:?}")]
     ToolNotInstalled(AiTool),
 
@@ -84,8 +82,6 @@ pub type Result<T> = std::result::Result<T, AiBridgeError>;
 /// AI Bridge configuration
 #[derive(Debug, Clone)]
 pub struct AiBridgeConfig {
-    /// Python virtual environment path
-    pub venv_path: PathBuf,
     /// GPU configuration
     pub gpu_config: GpuConfig,
     /// Timeout duration
@@ -94,42 +90,15 @@ pub struct AiBridgeConfig {
     pub retry_config: RetryConfig,
     /// Log level
     pub log_level: LogLevel,
-    /// Directory containing bridge scripts (None = auto-detect)
-    pub bridge_scripts_dir: Option<PathBuf>,
 }
-
-//impl Default for AiBridgeConfig {
-//    fn default() -> Self {
-//        Self {
-//            venv_path: PathBuf::from("./ai_venv"),
-//            gpu_config: GpuConfig::default(),
-//            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-//            retry_config: RetryConfig::default(),
-//            log_level: LogLevel::Info,
-//            bridge_scripts_dir: None,
-//        }
-//    }
-//}
 
 impl Default for AiBridgeConfig {
     fn default() -> Self {
-        // 環境変数 SUPERBOOK_VENV があればそれを使用し、なければデフォルトの ./ai_venv を使う
-        let venv_path = std::env::var("SUPERBOOK_VENV")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./ai_venv"));
-
-        // 環境変数 SUPERBOOK_BRIDGE_SCRIPTS_DIR からパスを取得
-        let bridge_scripts_dir = std::env::var("SUPERBOOK_BRIDGE_SCRIPTS_DIR")
-            .map(PathBuf::from)
-            .ok();
-
         Self {
-            venv_path,
             gpu_config: GpuConfig::default(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             retry_config: RetryConfig::default(),
             log_level: LogLevel::Info,
-            bridge_scripts_dir,
         }
     }
 }
@@ -175,13 +144,6 @@ pub struct AiBridgeConfigBuilder {
 }
 
 impl AiBridgeConfigBuilder {
-    /// Set Python virtual environment path
-    #[must_use]
-    pub fn venv_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.venv_path = path.into();
-        self
-    }
-
     /// Set GPU configuration
     #[must_use]
     pub fn gpu_config(mut self, config: GpuConfig) -> Self {
@@ -228,13 +190,6 @@ impl AiBridgeConfigBuilder {
     #[must_use]
     pub fn log_level(mut self, level: LogLevel) -> Self {
         self.config.log_level = level;
-        self
-    }
-
-    /// Set bridge scripts directory
-    #[must_use]
-    pub fn bridge_scripts_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.config.bridge_scripts_dir = Some(dir.into());
         self
     }
 
@@ -349,24 +304,6 @@ pub enum AiTool {
 }
 
 impl AiTool {
-    /// Get the module name for Python
-    #[must_use]
-    pub fn module_name(&self) -> &str {
-        match self {
-            AiTool::RealESRGAN => "realesrgan",
-            AiTool::YomiToku => "yomitoku",
-        }
-    }
-
-    /// Get the bridge script filename
-    #[must_use]
-    pub fn bridge_script_name(&self) -> &str {
-        match self {
-            AiTool::RealESRGAN => "realesrgan_bridge.py",
-            AiTool::YomiToku => "yomitoku_bridge.py",
-        }
-    }
-
     /// Get the display name for user-facing messages
     #[must_use]
     pub fn display_name(&self) -> &str {
@@ -383,102 +320,7 @@ impl std::fmt::Display for AiTool {
     }
 }
 
-/// Resolve the path to a bridge script for the given AI tool.
-///
-/// Search order:
-/// 1. `config.bridge_scripts_dir` (if specified)
-/// 2. `config.venv_path.parent()` (venv parent directory)
-/// 3. Current executable's directory / `ai_bridge/`
-/// 4. `./ai_bridge/` (current working directory)
-///
-/// Returns the path if found, or an error with all searched paths.
-pub fn resolve_bridge_script(tool: AiTool, config: &AiBridgeConfig) -> Result<PathBuf> {
-    let script_name = tool.bridge_script_name();
-    let mut searched_paths = Vec::new();
-
-    // --- 追加箇所: 0. 環境変数を最優先でチェック ---
-    if let Ok(env_dir) = std::env::var("SUPERBOOK_BRIDGE_SCRIPTS_DIR") {
-        let path = PathBuf::from(env_dir).join(script_name);
-        if path.exists() {
-            return Ok(path);
-        }
-        searched_paths.push(path);
-    }
-
-    // 1. Check explicit bridge_scripts_dir
-    if let Some(ref dir) = config.bridge_scripts_dir {
-        let path = dir.join(script_name);
-        if path.exists() {
-            return Ok(path);
-        }
-        searched_paths.push(path);
-    }
-
-    // 2. Check venv parent directory
-    if let Some(parent) = config.venv_path.parent() {
-        let path = parent.join(script_name);
-        if path.exists() {
-            return Ok(path);
-        }
-        searched_paths.push(path);
-    }
-
-    // 3. Check executable's directory / ai_bridge/
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let path = exe_dir.join("ai_bridge").join(script_name);
-            if path.exists() {
-                return Ok(path);
-            }
-            searched_paths.push(path);
-        }
-    }
-
-    // 4. Check ./ai_bridge/ (CWD)
-    let cwd_path = PathBuf::from("ai_bridge").join(script_name);
-    if cwd_path.exists() {
-        return Ok(cwd_path);
-    }
-    searched_paths.push(cwd_path);
-
-    // Not found anywhere
-    let paths_str: Vec<String> = searched_paths
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
-    Err(AiBridgeError::ProcessFailed(format!(
-        "Bridge script '{}' for {} not found. Searched paths:\n  - {}",
-        script_name,
-        tool.display_name(),
-        paths_str.join("\n  - ")
-    )))
-}
-
 /// AI Bridge trait
-//pub trait AiBridge {
-//    /// Initialize bridge
-//    fn new(config: AiBridgeConfig) -> Result<Self>
-//    where
-//        Self: Sized;
-//
-//    /// Check if tool is available
-//    fn check_tool(&self, tool: AiTool) -> Result<bool>;
-//
-//    /// Check GPU status
-//    fn check_gpu(&self) -> Result<GpuStats>;
-//
-//    /// Execute task (sync)
-//    fn execute(
-//        &self,
-//        tool: AiTool,
-//        input_files: &[PathBuf],
-//        output_dir: &Path,
-//        tool_options: &dyn std::any::Any,
-//    ) -> Result<AiTaskResult>;
-//
-//    /// Cancel running process
-//    fn cancel(&self) -> Result<()>;
-//}
 #[async_trait]
 pub trait AiBridge: Send + Sync { // 🚀 Send + Sync を追加してスレッド間共有を可能に
     /// Initialize bridge
@@ -504,431 +346,6 @@ pub trait AiBridge: Send + Sync { // 🚀 Send + Sync を追加してスレッ�
 
     /// Cancel running process
     async fn cancel(&self) -> Result<()>;
-}
-
-/// Subprocess-based bridge implementation
-pub struct SubprocessBridge {
-    config: AiBridgeConfig,
-}
-
-impl SubprocessBridge {
-    // Create a new subprocess bridge
-    ///
-    /// Validates that the venv exists and warns if bridge scripts cannot be found.
-    #[allow(clippy::redundant_clone)] // Clone needed due to partial move restrictions
-    pub fn new(config: AiBridgeConfig) -> Result<Self> {
-        // Check if venv exists
-        if !config.venv_path.exists() {
-            return Err(AiBridgeError::VenvNotFound(config.venv_path.clone()));
-        }
-
-        // Pre-check bridge script availability and warn if missing
-        for tool in &[AiTool::RealESRGAN, AiTool::YomiToku] {
-            if resolve_bridge_script(*tool, &config).is_err() {
-                eprintln!(
-                    "Warning: Bridge script for {} not found. \
-                     {} will not work until '{}' is placed in the ai_bridge/ directory \
-                     or SUPERBOOK_BRIDGE_SCRIPTS_DIR is set.",
-                    tool.display_name(),
-                    tool.display_name(),
-                    tool.bridge_script_name(),
-                );
-            }
-        }
-
-        Ok(Self { config })
-    }
-
-    /// Get the configuration
-    pub fn config(&self) -> &AiBridgeConfig {
-        &self.config
-    }
-
-    /// Get Python executable path
-    fn get_python_path(&self) -> PathBuf {
-        if cfg!(windows) {
-            self.config.venv_path.join("Scripts").join("python.exe")
-        } else {
-            self.config.venv_path.join("bin").join("python")
-        }
-    }
-
-    /// Check if a tool is available
-    //pub fn check_tool(&self, tool: AiTool) -> Result<bool> {
-    //    let python = self.get_python_path();
-
-    //    if !python.exists() {
-    //        return Ok(false);
-    //    }
-
-    //    let output = Command::new(&python)
-    //        .arg("-c")
-    //        .arg(format!("import {}", tool.module_name()))
-    //        .output();
-
-    //    match output {
-    //        Ok(o) => Ok(o.status.success()),
-    //        Err(_) => Ok(false),
-    //    }
-    //}
-
-    //// Check GPU status
-    //pub fn check_gpu(&self) -> Result<GpuStats> {
-    //    let output = Command::new("nvidia-smi")
-    //        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-    //        .output()
-    //        .map_err(|_| AiBridgeError::GpuNotAvailable)?;
-
-    //    if !output.status.success() {
-    //        return Err(AiBridgeError::GpuNotAvailable);
-    //    }
-
-    //    let vram_str = String::from_utf8_lossy(&output.stdout);
-    //    let vram_mb: u64 = vram_str.trim().parse().unwrap_or(0);
-
-    //    Ok(GpuStats {
-    //        peak_vram_mb: vram_mb,
-    //        avg_utilization: 0.0,
-    //    })
-    //}
-
-    //// Execute AI tool
-    ///
-    /// # Arguments
-    /// * `tool` - The AI tool to execute
-    /// * `input_files` - Input file paths
-    /// * `output_dir` - Output directory for results
-    /// * `tool_options` - Tool-specific options (can be downcast to RealEsrganOptions, etc.)
-    pub fn execute(
-        &self,
-        tool: AiTool,
-        input_files: &[PathBuf],
-        output_dir: &Path,
-        tool_options: &dyn std::any::Any,
-    ) -> Result<AiTaskResult> {
-        let start_time = std::time::Instant::now();
-        let python = self.get_python_path();
-
-        // Resolve bridge script path using multi-path fallback
-        let bridge_script = resolve_bridge_script(tool, &self.config)?;
-
-        let mut processed = Vec::new();
-        let mut failed = Vec::new();
-
-        for input_file in input_files {
-            let mut last_error = None;
-
-            // Generate output filename based on input
-            let output_filename = format!(
-                "{}{}x.png",
-                input_file.file_stem().unwrap_or_default().to_string_lossy(),
-                "2", // デフォルトは2倍で、必要に応じて tool_options から scale を取得して置き換えることもできます
-                // input_file.extension().unwrap_or_default().to_string_lossy() は不要なので削除
-            );
-            let output_path = output_dir.join(&output_filename);
-
-            for retry in 0..=self.config.retry_config.max_retries {
-                let mut cmd = Command::new(&python);
-                cmd.arg(&bridge_script);
-
-                match tool {
-                    AiTool::RealESRGAN => {
-                        cmd.arg("-i").arg(input_file);
-                        cmd.arg("-o").arg(&output_path);
-
-                        // Extract options from tool_options if available
-                        if let Some(opts) = tool_options.downcast_ref::<crate::RealEsrganOptions>() {
-                            cmd.arg("-s").arg(opts.scale.to_string());
-                            cmd.arg("-t").arg(opts.tile_size.to_string());
-                            if let Some(gpu_id) = opts.gpu_id {
-                                cmd.arg("-g").arg(gpu_id.to_string());
-                            }
-                            if !opts.fp16 {
-                                cmd.arg("--fp32");
-                            }
-                        } else if let Some(tile) = self.config.gpu_config.tile_size {
-                            cmd.arg("-t").arg(tile.to_string());
-                        }
-
-                        cmd.arg("--json");
-                    }
-                    AiTool::YomiToku => {
-                        cmd.arg(input_file);
-                        cmd.arg("--output").arg(output_dir);
-                        cmd.arg("--json");
-                    }
-                }
-
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::piped());
-
-                match cmd.output() {
-                    Ok(output) if output.status.success() => {
-                        processed.push(input_file.clone());
-                        last_error = None;
-                        break;
-                    }
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        last_error = Some(format!("stderr: {}, stdout: {}", stderr, stdout));
-
-                        if stderr.contains("out of memory") || stderr.contains("CUDA error") {
-                            return Err(AiBridgeError::OutOfMemory);
-                        }
-                    }
-                    Err(e) => {
-                        last_error = Some(e.to_string());
-                    }
-                }
-
-                // Wait before retry
-                if retry < self.config.retry_config.max_retries {
-                    let wait_time = if self.config.retry_config.exponential_backoff {
-                        self.config.retry_config.retry_interval * 2_u32.pow(retry)
-                    } else {
-                        self.config.retry_config.retry_interval
-                    };
-                    std::thread::sleep(wait_time);
-                }
-            }
-
-            if let Some(error) = last_error {
-                failed.push((input_file.clone(), error));
-            }
-        }
-
-        Ok(AiTaskResult {
-            processed_files: processed,
-            skipped_files: vec![],
-            failed_files: failed,
-            duration: start_time.elapsed(),
-            gpu_stats: None,
-        })
-    }
-
-    pub fn cancel(&self) -> Result<()> {
-        // Placeholder cancel support for subprocess bridge.
-        // A real implementation would track running child processes and kill them.
-        Ok(())
-    }
-
-    //// Execute a raw command with timeout
-    ///
-    /// This is a lower-level method for executing custom Python scripts
-    /// with arbitrary arguments and a configurable timeout.
-    pub fn execute_with_timeout(&self, args: &[String], timeout: Duration) -> Result<String> {
-        let python = self.get_python_path();
-
-        let mut cmd = Command::new(&python);
-        cmd.args(args);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let child = cmd
-            .spawn()
-            .map_err(|e| AiBridgeError::ProcessFailed(format!("Failed to spawn process: {}", e)))?;
-
-        // Wait for completion and check timeout
-        let start = std::time::Instant::now();
-        let output = child
-            .wait_with_output()
-            .map_err(|e| AiBridgeError::ProcessFailed(format!("Process error: {}", e)))?;
-
-        if start.elapsed() > timeout {
-            return Err(AiBridgeError::Timeout(timeout));
-        }
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("out of memory") || stderr.contains("CUDA error") {
-                return Err(AiBridgeError::OutOfMemory);
-            }
-            return Err(AiBridgeError::ProcessFailed(format!(
-                "Process exited with status {}: {}",
-                output.status, stderr
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    //// Cancel running process (placeholder)
-    //pub fn cancel(&self) -> Result<()> {
-    //    // In a full implementation, this would track and kill running processes
-    //    Ok(())
-    //}
-}
-
-#[async_trait]
-impl AiBridge for SubprocessBridge {
-    // トレイト版の new
-    fn new(config: AiBridgeConfig) -> Result<Self> {
-        SubprocessBridge::new(config)
-    }
-
-    // 🚀 追加
-    fn config(&self) -> &AiBridgeConfig {
-        &self.config
-    }
-
-    // 非同期化された check_tool
-    async fn check_tool(&self, tool: AiTool) -> Result<bool> {
-        // すでに impl SubprocessBridge にある同名メソッドを呼び出す
-        // self.check_tool(tool) や SubprocessBridge::check_tool(self, tool) だと
-        // トレイトの非同期メソッドを呼んでしまい無限ループ＆型エラーになります。
-        // 固有の同期版ロジックをここで直接実行するのが最も安全です。
-        let python = self.get_python_path();
-        if !python.exists() {
-            return Ok(false);
-        }
-        let output = Command::new(&python)
-            .arg("-c")
-            .arg(format!("import {}", tool.module_name()))
-            .output();
-    
-        match output {
-            Ok(o) => Ok(o.status.success()),
-            _ => Ok(false),
-        }
-    }
-
-    // 非同期化された check_gpu
-    async fn check_gpu(&self) -> Result<GpuStats> {
-        // すでに impl SubprocessBridge にある同名メソッドを呼び出す
-        let output = Command::new("nvidia-smi")
-            .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-            .output()
-            .map_err(|_| AiBridgeError::GpuNotAvailable)?;
-
-        if !output.status.success() {
-            return Err(AiBridgeError::GpuNotAvailable);
-        }
-
-        let vram_str = String::from_utf8_lossy(&output.stdout);
-        let vram_mb: u64 = vram_str.trim().parse().unwrap_or(0);
-        
-        Ok(GpuStats {
-            peak_vram_mb: vram_mb,
-            avg_utilization: 0.0,
-        })
-    }
-
-    // 非同期化された execute
-    // For subprocess bridge, we execute synchronously
-    async fn execute(
-        &self,
-        tool: AiTool,
-        input_files: &[PathBuf],
-        output_dir: &Path,
-        tool_options: &(dyn std::any::Any + Send + Sync),
-    ) -> Result<AiTaskResult> {
-        // Call the synchronous version inline
-        // This is acceptable because subprocess execution is already blocking anyway
-        let start_time = std::time::Instant::now();
-        let python = self.get_python_path();
-
-        // Resolve bridge script path using multi-path fallback
-        let bridge_script = resolve_bridge_script(tool, &self.config)?;
-
-        let mut processed = Vec::new();
-        let mut failed = Vec::new();
-
-        for input_file in input_files {
-            let mut last_error = None;
-
-            // Generate output filename based on input
-            let output_filename = format!(
-                "{}_upscaled.{}",
-                input_file.file_stem().unwrap_or_default().to_string_lossy(),
-                input_file.extension().unwrap_or_default().to_string_lossy()
-            );
-            let output_path = output_dir.join(&output_filename);
-
-            for retry in 0..=self.config.retry_config.max_retries {
-                let mut cmd = Command::new(&python);
-                cmd.arg(&bridge_script);
-
-                match tool {
-                    AiTool::RealESRGAN => {
-                        cmd.arg("-i").arg(input_file);
-                        cmd.arg("-o").arg(&output_path);
-
-                        // Extract options from tool_options if available
-                        if let Some(opts) = tool_options.downcast_ref::<crate::RealEsrganOptions>() {
-                            cmd.arg("-s").arg(opts.scale.to_string());
-                            cmd.arg("-t").arg(opts.tile_size.to_string());
-                            if let Some(gpu_id) = opts.gpu_id {
-                                cmd.arg("-g").arg(gpu_id.to_string());
-                            }
-                            if !opts.fp16 {
-                                cmd.arg("--fp32");
-                            }
-                        } else if let Some(tile) = self.config.gpu_config.tile_size {
-                            cmd.arg("-t").arg(tile.to_string());
-                        }
-
-                        cmd.arg("--json");
-                    }
-                    AiTool::YomiToku => {
-                        cmd.arg(input_file);
-                        cmd.arg("--output").arg(output_dir);
-                        cmd.arg("--json");
-                    }
-                }
-
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::piped());
-
-                match cmd.output() {
-                    Ok(output) if output.status.success() => {
-                        processed.push(input_file.clone());
-                        last_error = None;
-                        break;
-                    }
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        last_error = Some(format!("stderr: {}, stdout: {}", stderr, stdout));
-
-                        if stderr.contains("out of memory") || stderr.contains("CUDA error") {
-                            return Err(AiBridgeError::OutOfMemory);
-                        }
-                    }
-                    Err(e) => {
-                        last_error = Some(e.to_string());
-                    }
-                }
-
-                // Wait before retry
-                if retry < self.config.retry_config.max_retries {
-                    let wait_time = if self.config.retry_config.exponential_backoff {
-                        self.config.retry_config.retry_interval * 2_u32.pow(retry)
-                    } else {
-                        self.config.retry_config.retry_interval
-                    };
-                    std::thread::sleep(wait_time);
-                }
-            }
-
-            if let Some(error) = last_error {
-                failed.push((input_file.clone(), error));
-            }
-        }
-
-        Ok(AiTaskResult {
-            processed_files: processed,
-            skipped_files: vec![],
-            failed_files: failed,
-            duration: start_time.elapsed(),
-            gpu_stats: None,
-        })
-    }
-
-    // 非同期化された cancel
-    async fn cancel(&self) -> Result<()> {
-        SubprocessBridge::cancel(self)
-    }
 }
 
 // --- HttpApiBridge の完全実装 ---

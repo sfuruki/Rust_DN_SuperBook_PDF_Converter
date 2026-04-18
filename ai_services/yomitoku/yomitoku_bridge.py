@@ -3,7 +3,7 @@
 YomiToku Bridge for superbook-pdf
 
 Japanese AI-OCR using YomiToku for high-accuracy text recognition.
-Designed to be called from Rust via subprocess.
+Backend implementation used by FastAPI HTTP service (app.py).
 
 Usage:
     python yomitoku_bridge.py INPUT [options]

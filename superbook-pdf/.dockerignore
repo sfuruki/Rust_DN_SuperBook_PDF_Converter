@@ -1,8 +1,6 @@
 target/
 .git/
 docker/
-ai_bridge/weights/
-ai_bridge/.venv/
 test_output_e2e/
 test_output_e2e_gpu/
 specs/

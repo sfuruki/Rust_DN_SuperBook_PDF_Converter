@@ -65,31 +65,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv (fast Python package manager)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
-
 # Create app directory
 WORKDIR /app
 
 # Copy Rust binary from builder
 COPY --from=builder /build/target/release/superbook-pdf /usr/local/bin/
 
-# Setup Python virtual environment for AI tools (CPU-only PyTorch)
-ENV AI_VENV=/app/ai_venv
-RUN uv venv $AI_VENV --python python3.10 \
-    && VIRTUAL_ENV=$AI_VENV uv pip install \
-        torch torchvision \
-        --index-url https://download.pytorch.org/whl/cpu \
-    && VIRTUAL_ENV=$AI_VENV uv pip install realesrgan yomitoku \
-    && VIRTUAL_ENV=$AI_VENV uv pip install "numpy<2"
-
 # Create data directories
 RUN mkdir -p /data/input /data/output /data/work
 
 # Environment - CPU only
 ENV SUPERBOOK_NO_GPU=1
-ENV SUPERBOOK_VENV=$AI_VENV
 
 # API server configuration
 ENV SUPERBOOK_BIND=0.0.0.0
