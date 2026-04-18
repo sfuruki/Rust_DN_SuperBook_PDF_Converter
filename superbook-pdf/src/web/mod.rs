@@ -1,13 +1,12 @@
 //! Web server module for superbook-pdf
 //!
-//! Provides a REST API and simple Web UI for PDF conversion.
+//! Provides a REST API and WebSocket endpoints for PDF conversion.
 //!
 //! # Features
 //!
 //! - PDF upload and conversion via REST API
 //! - Real-time job status tracking
 //! - Result download
-//! - Simple Web UI for browser access
 //!
 //! # Usage
 //!

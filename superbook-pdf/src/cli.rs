@@ -76,7 +76,7 @@ impl From<ExitCode> for std::process::ExitCode {
 Quick Start:
   superbook-pdf convert input.pdf -o output/           # 基本変換
   superbook-pdf convert input.pdf -o output/ --advanced --ocr  # 高品質変換
-  superbook-pdf serve --port 8080                      # Web UI起動
+    superbook-pdf serve --port 8080                      # Web API起動（UIはNginx側）
 
 詳細は `superbook-pdf <COMMAND> --help` を参照
 "#)]

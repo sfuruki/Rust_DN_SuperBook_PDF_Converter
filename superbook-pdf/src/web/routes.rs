@@ -9,9 +9,8 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use rust_embed::RustEmbed;
-use serde_json::Value;
 use serde::Serialize;
+use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -30,11 +29,6 @@ use super::worker::WorkerPool;
 
 use std::net::IpAddr;
 use std::path::PathBuf;
-
-/// Embedded static files
-#[derive(RustEmbed)]
-#[folder = "src/web/static"]
-struct Assets;
 
 /// Application state shared across handlers
 pub struct AppState {
@@ -166,11 +160,6 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/auth/status", get(get_auth_status))
 }
 
-/// Build the web UI router
-pub fn web_routes() -> Router<Arc<AppState>> {
-    Router::new().route("/", get(index_page))
-}
-
 /// Build the WebSocket router
 pub fn ws_routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -205,22 +194,6 @@ async fn ws_batch_handler(
         axum::extract::State(state.broadcaster.clone()),
     )
     .await
-}
-
-/// Serve the index page
-async fn index_page() -> impl IntoResponse {
-    match Assets::get("index.html") {
-        Some(content) => {
-            let body = content.data.into_owned();
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                body,
-            )
-                .into_response()
-        }
-        None => (StatusCode::NOT_FOUND, "Not Found").into_response(),
-    }
 }
 
 /// AI service version information

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use super::cors::CorsConfig;
-use super::routes::{api_routes, web_routes, ws_routes, AppState};
+use super::routes::{api_routes, ws_routes, AppState};
 use super::shutdown::{wait_for_shutdown_signal, ShutdownConfig};
 use super::{DEFAULT_BIND, DEFAULT_PORT, DEFAULT_UPLOAD_LIMIT};
 
@@ -133,7 +133,6 @@ impl WebServer {
     /// Build the router
     fn build_router(&self) -> Router {
         Router::new()
-            .merge(web_routes())
             .nest("/api", api_routes())
             .nest("/ws", ws_routes())
             .layer(self.config.cors.clone().into_layer())

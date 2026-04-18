@@ -1,5 +1,8 @@
 # 20-web.spec.md - Webインターフェース仕様
 
+⚠️ DEPRECATED (部分): Rust での WebUI 静的配信仕様は旧設計。
+現行は Nginx (`web_ui/`) が UI を配信し、Rust Core は `/api/*` と `/ws/*` のみ提供する。
+
 ## 概要
 
 ブラウザからPDF変換を実行できるWebインターフェース。REST APIとシンプルなWebUIを提供。
@@ -26,7 +29,8 @@
 │    GET  /api/jobs/:id/download - 結果ダウンロード   │
 │    DELETE /api/jobs/:id  - ジョブキャンセル         │
 │    GET  /api/health      - ヘルスチェック           │
-│    GET  /                - WebUI                    │
+│    WS   /ws/jobs/:id     - 進捗通知                 │
+│    WS   /ws/batch/:id    - バッチ進捗通知           │
 ├─────────────────────────────────────────────────────┤
 │  Background Workers:                                │
 │    - JobQueue (tokio::mpsc)                         │
@@ -131,7 +135,7 @@ options: {
 
 ### WebUI
 
-シンプルなHTML/CSS/JSによるフロントエンド。
+現行では `web_ui/` (Nginx) が HTML/CSS/JS を配信し、Rust Core は API/WS のみ担当。
 
 **機能:**
 - ドラッグ&ドロップでPDFアップロード
@@ -140,8 +144,9 @@ options: {
 - 結果ダウンロードボタン
 
 **技術:**
-- 静的ファイル埋め込み (rust-embed)
-- WebSocket for リアルタイム進捗 (v0.5.0で実装完了)
+- 静的ファイル配信: Nginx (`web_ui/static`)
+- API: Rust Core (`/api/*`)
+- WebSocket: Rust Core (`/ws/*`)
 
 ### データ構造
 
@@ -226,7 +231,7 @@ Options:
 | WEB-009 | 並行ジョブ処理 |
 | WEB-010 | アップロードサイズ制限 |
 | WEB-011 | タイムアウト処理 |
-| WEB-012 | WebUI静的ファイル配信 |
+| WEB-012 | Nginx WebUI静的ファイル配信 |
 
 ## 実装ステータス
 
@@ -238,7 +243,7 @@ Options:
 | CLIコマンド | 🟢 | 完了 (serve サブコマンド) |
 | バックグラウンド処理 | 🟢 | 完了 (WorkerPool + JobWorker) |
 | パイプライン統合 | 🟢 | 完了 (PdfPipeline + WebProgressCallback) |
-| WebUI | 🟢 | 完了 (rust-embed + ドラッグ&ドロップ) |
+| WebUI | 🟢 | 完了 (Nginx static + ドラッグ&ドロップ) |
 | 統合テスト | 🟢 | 完了 (14テストケース) |
 
 ## 依存クレート
@@ -251,7 +256,6 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "cors", "limit"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-rust-embed = "8"
 ```
 
 ## 注意事項
