@@ -42,9 +42,18 @@ services:
         condition: service_healthy
       yomitoku-api:
         condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     environment:
       - RUST_LOG=info
       - SUPERBOOK_WORK_DIR=/data/work
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # マイクロサービス間の通信用URL [構築方針]
       - REALESRGAN_API_URL=http://realesrgan-api:8000
       - YOMITOKU_API_URL=http://yomitoku-api:8000

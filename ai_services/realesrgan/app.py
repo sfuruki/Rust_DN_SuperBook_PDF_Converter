@@ -1,5 +1,6 @@
 import os
 import time
+import sys
 import torch
 import cv2
 import numpy as np
@@ -7,6 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 # 既存のブリッジロジックをインポート [2]
 import realesrgan_bridge as bridge
@@ -44,8 +46,15 @@ async def warmup():
 @app.get("/version")
 async def get_version():
     """システム情報を返却。Rust Core側のハンドシェイクに使用 [1, 4]"""
+    try:
+        realesrgan_version = pkg_version("realesrgan")
+    except PackageNotFoundError:
+        realesrgan_version = "unknown"
+
     return {
         "service": "realesrgan-upscale",
+        "service_version": realesrgan_version,
+        "python_version": sys.version.split()[0],
         "torch_version": torch.__version__,
         "cuda_available": torch.cuda.is_available(),
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"

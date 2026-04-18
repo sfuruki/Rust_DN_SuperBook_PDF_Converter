@@ -228,6 +228,8 @@ async fn index_page() -> impl IntoResponse {
 pub struct AiServiceVersion {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub torch_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cuda_available: Option<bool>,
@@ -269,6 +271,7 @@ async fn fetch_ai_version(base_url: &str) -> AiServiceVersion {
         Err(_) => {
             return AiServiceVersion {
                 available: false,
+                service_version: None,
                 torch_version: None,
                 cuda_available: None,
                 device: None,
@@ -285,6 +288,10 @@ async fn fetch_ai_version(base_url: &str) -> AiServiceVersion {
             match resp.json::<serde_json::Value>().await {
                 Ok(v) => AiServiceVersion {
                     available: true,
+                    service_version: v
+                        .get("service_version")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string()),
                     torch_version: v
                         .get("torch_version")
                         .and_then(|s| s.as_str())
@@ -297,6 +304,7 @@ async fn fetch_ai_version(base_url: &str) -> AiServiceVersion {
                 },
                 Err(_) => AiServiceVersion {
                     available: true,
+                    service_version: None,
                     torch_version: None,
                     cuda_available: None,
                     device: None,
@@ -305,6 +313,7 @@ async fn fetch_ai_version(base_url: &str) -> AiServiceVersion {
         }
         _ => AiServiceVersion {
             available: false,
+            service_version: None,
             torch_version: None,
             cuda_available: None,
             device: None,

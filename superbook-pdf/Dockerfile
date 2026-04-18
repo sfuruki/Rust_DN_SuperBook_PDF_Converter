@@ -36,6 +36,9 @@ LABEL component="superbook-pdf"
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Tokyo
 
+# nvidia-smi is provided by non-free NVIDIA packages on Debian.
+RUN sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources
+
 # PDF操作に必要な外部ツールのインストール
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # PDF抽出・操作ツール [3-5]
@@ -43,6 +46,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ghostscript \
     qpdf \
     imagemagick \
+    # Optional OCR / page-number detection
+    tesseract-ocr \
+    # GPU utility command for direct runtime diagnostics
+    nvidia-smi \
     # 日本語フォント (PDF生成時のOCRレイヤー埋め込み用) [4-6]
     fonts-noto-cjk \
     fonts-noto-cjk-extra \

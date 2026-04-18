@@ -2,11 +2,13 @@ import os
 import time
 import asyncio
 import traceback
+import sys
 import torch
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 # 既存のブリッジロジックをインポート（フォルダ移動済み前提）
 import yomitoku_bridge as bridge
@@ -64,8 +66,15 @@ async def get_version():
     """
     システム情報を返却。Rust Core側のハンドシェイクに使用されます [2]。
     """
+    try:
+        yomitoku_version = pkg_version("yomitoku")
+    except PackageNotFoundError:
+        yomitoku_version = "unknown"
+
     return {
         "service": "yomitoku-ocr",
+        "service_version": yomitoku_version,
+        "python_version": sys.version.split()[0],
         "torch_version": torch.__version__ if torch else "not_installed",
         "cuda_available": torch.cuda.is_available() if torch else False,
         "device": torch.cuda.get_device_name(0) if (torch and torch.cuda.is_available()) else "cpu",

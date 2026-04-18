@@ -579,19 +579,31 @@ fn run_info() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("PDF Extraction Tools:");
     check_tool_with_version("pdftoppm", "Poppler", &["-v"]);
-    check_tool_with_version("magick", "ImageMagick", &["--version"]);
-    check_tool("gs", "Ghostscript");
+    check_tool_with_version("pdfinfo", "Poppler pdfinfo", &["-v"]);
+    check_imagemagick_tool();
+    check_imagemagick_identify_tool();
+    check_tool_with_version("gs", "Ghostscript", &["--version"]);
+    check_tool_with_version("qpdf", "QPDF", &["--version"]);
 
     println!();
-    println!("OCR Tools:");
+    println!("Runtime Tools:");
+    check_python_tool();
+
+    println!();
+    println!("Page Number OCR (Optional):");
     check_tool_with_version("tesseract", "Tesseract", &["--version"]);
 
-    // Python & AI Tools
+    // AI Services (HTTP microservices)
     println!();
-    println!("AI Tools (Python):");
-    check_python();
+    println!("AI Services:");
+    let realesrgan_url = std::env::var("REALESRGAN_API_URL")
+        .unwrap_or_else(|_| "http://realesrgan-api:8000".to_string());
+    let yomitoku_url = std::env::var("YOMITOKU_API_URL")
+        .unwrap_or_else(|_| "http://yomitoku-api:8000".to_string());
+    let realesrgan_info = check_ai_service("RealESRGAN", &realesrgan_url);
+    let yomitoku_info = check_ai_service("YomiToku", &yomitoku_url);
 
-    // GPU Status
+    // GPU Status (via nvidia-smi if available)
     println!();
     println!("GPU Status:");
     if let Ok(output) = std::process::Command::new("nvidia-smi")
@@ -608,7 +620,18 @@ fn run_info() -> Result<(), Box<dyn std::error::Error>> {
             println!("  NVIDIA GPU: Not detected");
         }
     } else {
-        println!("  NVIDIA GPU: nvidia-smi not found");
+        println!("  NVIDIA GPU: nvidia-smi not found (using AI service metadata)");
+        if let Some(info) = realesrgan_info.as_ref().or(yomitoku_info.as_ref()) {
+            if let Some(device) = &info.device {
+                println!("  Device (from {}): {}", info.name, device);
+            }
+            if let Some(vram) = info.vram_total_gb {
+                println!("  VRAM (from {}): {:.2} GB", info.name, vram);
+            }
+            if let Some(cuda) = info.cuda_available {
+                println!("  CUDA (from {}): {}", info.name, if cuda { "✅" } else { "❌" });
+            }
+        }
     }
 
     // Config File Locations
@@ -625,10 +648,111 @@ fn run_info() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn check_tool(cmd: &str, name: &str) {
-    match which::which(cmd) {
-        Ok(path) => println!("  {}: {} (found)", name, path.display()),
-        Err(_) => println!("  {}: Not found", name),
+struct AiServiceInfo {
+    name: String,
+    cuda_available: Option<bool>,
+    device: Option<String>,
+    vram_total_gb: Option<f64>,
+}
+
+fn check_ai_service(name: &str, url: &str) -> Option<AiServiceInfo> {
+    let version_url = format!("{}/version", url.trim_end_matches('/'));
+    match ureq::get(&version_url).timeout(std::time::Duration::from_secs(5)).call() {
+        Ok(response) => {
+            if let Ok(body) = response.into_string() {
+                // Parse key fields from JSON body
+                let service_version = extract_json_str(&body, "service_version");
+                let torch = extract_json_str(&body, "torch_version");
+                let cuda = extract_json_bool(&body, "cuda_available");
+                let device = extract_json_str(&body, "device");
+                let vram_total_gb = extract_json_f64(&body, "vram_total_gb");
+                let python_version = extract_json_str(&body, "python_version");
+                println!("  {}: Available (url={})", name, url);
+                if let Some(v) = service_version { println!("    Version: {}", v); }
+                if let Some(p) = python_version.as_ref() { println!("    Python: {}", p); }
+                if let Some(t) = torch { println!("    Torch: {}", t); }
+                if let Some(c) = cuda { println!("    CUDA: {}", if c { "✅" } else { "❌" }); }
+                if let Some(ref d) = device { println!("    Device: {}", d); }
+                if let Some(v) = vram_total_gb { println!("    VRAM: {:.2} GB", v); }
+                return Some(AiServiceInfo {
+                    name: name.to_string(),
+                    cuda_available: cuda,
+                    device,
+                    vram_total_gb,
+                });
+            } else {
+                println!("  {}: Available (url={})", name, url);
+            }
+        }
+        Err(e) => {
+            println!("  {}: Unavailable (url={}, error={})", name, url, e);
+        }
+    }
+    None
+}
+
+fn extract_json_str(json: &str, key: &str) -> Option<String> {
+    let pattern = format!("\"{}\":", key);
+    let pos = json.find(&pattern)?;
+    let rest = json[pos + pattern.len()..].trim_start();
+    if rest.starts_with('"') {
+        let inner = &rest[1..];
+        let end = inner.find('"')?;
+        Some(inner[..end].to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
+    let pattern = format!("\"{}\":", key);
+    let pos = json.find(&pattern)?;
+    let rest = json[pos + pattern.len()..].trim_start();
+    if rest.starts_with("true") { Some(true) }
+    else if rest.starts_with("false") { Some(false) }
+    else { None }
+}
+
+fn extract_json_f64(json: &str, key: &str) -> Option<f64> {
+    let pattern = format!("\"{}\":", key);
+    let pos = json.find(&pattern)?;
+    let rest = json[pos + pattern.len()..].trim_start();
+    let end = rest
+        .find(|c: char| c == ',' || c == '}' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    rest[..end].trim().parse::<f64>().ok()
+}
+
+fn check_imagemagick_tool() {
+    // Debian/Ubuntu images often provide ImageMagick as `convert` without `magick`.
+    if which::which("magick").is_ok() {
+        check_tool_with_version("magick", "ImageMagick", &["--version"]);
+    } else {
+        check_tool_with_version("convert", "ImageMagick", &["--version"]);
+    }
+}
+
+fn check_imagemagick_identify_tool() {
+    if which::which("identify").is_ok() {
+        check_tool_with_version("identify", "ImageMagick Identify", &["-version"]);
+    } else if which::which("magick").is_ok() {
+        check_tool_with_version("magick", "ImageMagick Identify", &["identify", "-version"]);
+    } else {
+        println!("  ImageMagick Identify: Not found");
+    }
+}
+
+fn check_python_tool() {
+    if which::which("python3").is_ok() {
+        check_tool_with_version("python3", "Python (Core)", &["--version"]);
+    } else {
+        if which::which("python").is_ok() {
+            check_tool_with_version("python", "Python (Core)", &["--version"]);
+        } else {
+            println!(
+                "  Python (Core): Not found (expected: Python is provided by AI service containers)"
+            );
+        }
     }
 }
 
@@ -640,10 +764,18 @@ fn check_tool_with_version(cmd: &str, name: &str, version_args: &[&str]) {
                 .args(version_args)
                 .output()
             {
-                let version_str = String::from_utf8_lossy(&output.stdout);
-                let first_line = version_str.lines().next().unwrap_or("");
-                if !first_line.is_empty() && first_line.len() < 80 {
-                    println!("  {}: {} ({})", name, first_line.trim(), path.display());
+                // Some tools print version to stderr (e.g. pdftoppm -v), so check both.
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let version_line = stdout
+                    .lines()
+                    .chain(stderr.lines())
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("");
+
+                if !version_line.is_empty() && version_line.len() < 120 {
+                    println!("  {}: {} ({})", name, version_line, path.display());
                 } else {
                     println!("  {}: {} (found)", name, path.display());
                 }
@@ -652,185 +784,6 @@ fn check_tool_with_version(cmd: &str, name: &str, version_args: &[&str]) {
             }
         }
         Err(_) => println!("  {}: Not found", name),
-    }
-}
-
-//fn check_python() {
-//    // Check for Python
-//    let python_cmd = if which::which("python3").is_ok() {
-//        "python3"
-//    } else if which::which("python").is_ok() {
-//        "python"
-//    } else {
-//        println!("  Python: Not found");
-//        return;
-//    };
-
-//    if let Ok(output) = std::process::Command::new(python_cmd)
-//        .args(["--version"])
-//        .output()
-//    {
-//        let version = String::from_utf8_lossy(&output.stdout);
-//        println!("  Python: {}", version.trim());
-//    }
-
-//    // Check for RealESRGAN
-//    if let Ok(output) = std::process::Command::new(python_cmd)
-//        .args(["-c", "import realesrgan; print('available')"])
-//        .output()
-//    {
-//        if output.status.success() {
-//            println!("  RealESRGAN: Available");
-//        } else {
-//            println!("  RealESRGAN: Not installed");
-//        }
-//    }
-//
-//    // Check for YomiToku
-//    if let Ok(output) = std::process::Command::new(python_cmd)
-//        .args(["-c", "import yomitoku; print('available')"])
-//        .output()
-//    {
-//        if output.status.success() {
-//            println!("  YomiToku: Available");
-//        } else {
-//            println!("  YomiToku: Not installed");
-//        }
-//    }
-//
-//    // Check bridge scripts availability
-//    println!();
-//    println!("Bridge Scripts:");
-//
-//    let venv_path = superbook_pdf::resolve_venv_path();
-//
-//    let bridge_scripts_dir = std::env::var("SUPERBOOK_BRIDGE_SCRIPTS_DIR")
-//        .map(PathBuf::from)
-//        .ok();
-//
-//    let config = superbook_pdf::AiBridgeConfig::builder()
-//        .venv_path(&venv_path)
-//        .build();
-//
-//    let config = if let Some(dir) = bridge_scripts_dir {
-//        superbook_pdf::AiBridgeConfig {
-//            bridge_scripts_dir: Some(dir),
-//            ..config
-//        }
-//    } else {
-//        config
-//    };
-//
-//    for tool in &[
-//        superbook_pdf::AiTool::RealESRGAN,
-//        superbook_pdf::AiTool::YomiToku,
-//    ] {
-//        match superbook_pdf::resolve_bridge_script(*tool, &config) {
-//            Ok(path) => {
-//                println!(
-//                    "  {} ({}): Found at {}",
-//                    tool.display_name(),
-//                    tool.bridge_script_name(),
-//                    path.display()
-//                );
-//            }
-//            Err(_) => {
-//                println!(
-//                    "  {} ({}): NOT FOUND",
-//                    tool.display_name(),
-//                    tool.bridge_script_name()
-//                );
-//                println!(
-//                    "    → Place the script in ./ai_bridge/ or set SUPERBOOK_BRIDGE_SCRIPTS_DIR"
-//                );
-//            }
-//        }
-//    }
-//}
-
-fn check_python() {
-    // 1. あなたが ai_bridge.rs で修正した Default 実装により、
-    // 環境変数 SUPERBOOK_VENV や SUPERBOOK_BRIDGE_SCRIPTS_DIR が自動的に反映されます
-    let config = superbook_pdf::AiBridgeConfig::default();
-
-    // 2. 仮想環境内の Python 実行ファイルのパスを組み立てます
-    let python_exe = if cfg!(windows) {
-        config.venv_path.join("Scripts").join("python.exe")
-    } else {
-        config.venv_path.join("bin").join("python")
-    };
-
-    // 3. 仮想環境の Python が存在するか確認
-    if !python_exe.exists() {
-        println!("  Python: NOT FOUND at {}", python_exe.display());
-        println!("    → Check SUPERBOOK_VENV or virtual environment path.");
-        return;
-    }
-
-    // Python のバージョン確認
-    if let Ok(output) = std::process::Command::new(&python_exe)
-        .args(["--version"])
-        .output()
-    {
-        let version = String::from_utf8_lossy(&output.stdout);
-        println!("  Python: {} ({})", version.trim(), python_exe.display());
-    }
-
-    // 4. 以降、システム Python ではなく python_exe (仮想環境) を使用してライブラリをチェック
-    // RealESRGAN のチェック
-    if let Ok(output) = std::process::Command::new(&python_exe)
-        .args(["-c", "import realesrgan; print('available')"])
-        .output()
-    {
-        if output.status.success() {
-            println!("  RealESRGAN: Available");
-        } else {
-            println!("  RealESRGAN: Not installed (Check venv in {})", config.venv_path.display());
-        }
-    }
-
-    // YomiToku のチェック
-    if let Ok(output) = std::process::Command::new(&python_exe)
-        .args(["-c", "import yomitoku; print('available')"])
-        .output()
-    {
-        if output.status.success() {
-            println!("  YomiToku: Available");
-        } else {
-            println!("  YomiToku: Not installed (Check venv in {})", config.venv_path.display());
-        }
-    }
-
-    // 5. ブリッジスクリプトのチェック
-    // resolve_bridge_script は既に環境変数 SUPERBOOK_BRIDGE_SCRIPTS_DIR を
-    // 最優先で見るように修正されているため、これを利用します
-    println!();
-    println!("Bridge Scripts:");
-
-    for tool in &[
-        superbook_pdf::AiTool::RealESRGAN,
-        superbook_pdf::AiTool::YomiToku,
-    ] {
-        match superbook_pdf::resolve_bridge_script(*tool, &config) {
-            Ok(path) => {
-                println!(
-                    "  {} ({}): Found at {}",
-                    tool.display_name(),
-                    tool.bridge_script_name(),
-                    path.display()
-                );
-            }
-            Err(_) => {
-                println!(
-                    "  {} ({}): NOT FOUND",
-                    tool.display_name(),
-                    tool.bridge_script_name()
-                );
-                println!(
-                    "    → Place the script in ./ai_bridge/ or set SUPERBOOK_BRIDGE_SCRIPTS_DIR"
-                );
-            }
-        }
     }
 }
 
