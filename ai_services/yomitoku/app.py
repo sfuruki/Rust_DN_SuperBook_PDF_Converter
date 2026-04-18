@@ -1,5 +1,7 @@
 import os
 import time
+import asyncio
+import traceback
 import torch
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -39,10 +41,12 @@ async def warmup():
         cv2.imwrite(str(dummy_img_path), dummy_img)
         
         # 最小構成で一度実行
-        bridge.process_image(
+        await asyncio.to_thread(
+            bridge.process_image,
             dummy_img_path,
-            gpu_id=0 if torch.cuda.is_available() else None,
-            confidence_threshold=0.5
+            "json",
+            0 if torch.cuda.is_available() else None,
+            0.5,
         )
         print("OCR Warmup completed successfully.")
     except Exception as e:
@@ -83,10 +87,12 @@ async def perform_ocr(req: OcrRequest):
 
     try:
         # 既存のブリッジロジックを使用して画像処理を実行 [3]
-        result = bridge.process_image(
+        result = await asyncio.to_thread(
+            bridge.process_image,
             input_p,
-            gpu_id=req.gpu_id,
-            confidence_threshold=req.confidence
+            "json",
+            req.gpu_id,
+            req.confidence,
         )
 
         if result.get("exit_code") != 0:
@@ -111,8 +117,10 @@ async def perform_ocr(req: OcrRequest):
             print("CRITICAL: GPU Out of Memory detected.")
             raise HTTPException(status_code=507, detail="GPU Out of Memory in OCR Service.")
         print(f"Runtime Error: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

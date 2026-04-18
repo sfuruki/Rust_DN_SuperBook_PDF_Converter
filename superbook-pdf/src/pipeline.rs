@@ -1679,9 +1679,20 @@ impl PdfPipeline {
         ocr_results: &[Option<crate::OcrResult>],
         page_number_shift: Option<i32>,
         is_vertical: bool,
-        _progress: &P,
+        progress: &P,
     ) -> Result<(), PipelineError> {
         use crate::pdf_writer::{OcrLayer, OcrPageText, PdfViewerHints, TextBlock};
+
+        let ocr_page_count = ocr_results.iter().filter(|r| r.is_some()).count();
+        let ocr_block_count: usize = ocr_results
+            .iter()
+            .filter_map(|r| r.as_ref())
+            .map(|r| r.text_blocks.len())
+            .sum();
+        progress.on_warning(&format!(
+            "OCR layer input: {} pages, {} blocks",
+            ocr_page_count, ocr_block_count
+        ));
 
         // Convert OCR results to OcrLayer
         let ocr_layer = if !ocr_results.is_empty() {

@@ -10,6 +10,7 @@ use axum::{
     Router,
 };
 use rust_embed::RustEmbed;
+use serde_json::Value;
 use serde::Serialize;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -222,12 +223,32 @@ async fn index_page() -> impl IntoResponse {
     }
 }
 
+/// AI service version information
+#[derive(Debug, Clone, Serialize)]
+pub struct AiServiceVersion {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub torch_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cuda_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+}
+
+/// AI service versions
+#[derive(Debug, Clone, Serialize)]
+pub struct AiVersions {
+    pub realesrgan: AiServiceVersion,
+    pub yomitoku: AiServiceVersion,
+}
+
 /// Health check response
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub tools: ToolStatus,
+    pub ai_services: AiVersions,
 }
 
 #[derive(Debug, Serialize)]
@@ -238,23 +259,89 @@ pub struct ToolStatus {
     pub yomitoku: bool,
 }
 
+/// Fetch AI service version via HTTP GET {base_url}/version with a short timeout.
+async fn fetch_ai_version(base_url: &str) -> AiServiceVersion {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return AiServiceVersion {
+                available: false,
+                torch_version: None,
+                cuda_available: None,
+                device: None,
+            }
+        }
+    };
+
+    match client
+        .get(format!("{}/version", base_url))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(v) => AiServiceVersion {
+                    available: true,
+                    torch_version: v
+                        .get("torch_version")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string()),
+                    cuda_available: v.get("cuda_available").and_then(|s| s.as_bool()),
+                    device: v
+                        .get("device")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string()),
+                },
+                Err(_) => AiServiceVersion {
+                    available: true,
+                    torch_version: None,
+                    cuda_available: None,
+                    device: None,
+                },
+            }
+        }
+        _ => AiServiceVersion {
+            available: false,
+            torch_version: None,
+            cuda_available: None,
+            device: None,
+        },
+    }
+}
+
 /// Health check endpoint
 async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    let realesrgan_url = std::env::var("REALESRGAN_API_URL")
+        .unwrap_or_else(|_| "http://realesrgan-api:8000".into());
+    let yomitoku_url = std::env::var("YOMITOKU_API_URL")
+        .unwrap_or_else(|_| "http://yomitoku-api:8000".into());
+
+    let (realesrgan_ver, yomitoku_ver) =
+        tokio::join!(fetch_ai_version(&realesrgan_url), fetch_ai_version(&yomitoku_url));
+
     let tools = ToolStatus {
         poppler: which::which("pdftoppm").is_ok(),
         tesseract: which::which("tesseract").is_ok(),
-        realesrgan: check_python_module("realesrgan"),
-        yomitoku: check_python_module("yomitoku"),
+        realesrgan: realesrgan_ver.available,
+        yomitoku: yomitoku_ver.available,
     };
 
     Json(HealthResponse {
         status: "healthy".to_string(),
         version: state.version.clone(),
         tools,
+        ai_services: AiVersions {
+            realesrgan: realesrgan_ver,
+            yomitoku: yomitoku_ver,
+        },
     })
 }
 
-/// Check if a Python module is available
+/// Check if a Python module is available (used in non-HTTP/subprocess mode)
+#[allow(dead_code)]
 fn check_python_module(module: &str) -> bool {
     // Check if python3 exists
     let python = which::which("python3").or_else(|_| which::which("python"));
@@ -537,6 +624,55 @@ pub struct UploadResponse {
     pub created_at: String,
 }
 
+fn parse_convert_options(text: &str) -> Option<ConvertOptions> {
+    fn parse_relaxed_object_literal(input: &str) -> Option<ConvertOptions> {
+        let mut normalized = input.trim().to_string();
+        if !normalized.starts_with('{') || !normalized.ends_with('}') {
+            return None;
+        }
+
+        // Some clients send object-literal-like payloads without quoted keys.
+        for key in ["dpi", "deskew", "upscale", "ocr", "advanced"] {
+            let from = format!("{}:", key);
+            let to = format!("\"{}\":", key);
+            normalized = normalized.replace(&from, &to);
+        }
+
+        serde_json::from_str::<ConvertOptions>(&normalized).ok()
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<ConvertOptions>(text) {
+        return Some(parsed);
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<BatchRequest>(text) {
+        return Some(parsed.options);
+    }
+
+    if let Ok(parsed_text) = serde_json::from_str::<String>(text) {
+        if let Ok(parsed) = serde_json::from_str::<ConvertOptions>(&parsed_text) {
+            return Some(parsed);
+        }
+        if let Ok(parsed) = serde_json::from_str::<BatchRequest>(&parsed_text) {
+            return Some(parsed.options);
+        }
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        if let Some(options_value) = value.get("options") {
+            if let Ok(parsed) = serde_json::from_value::<ConvertOptions>(options_value.clone()) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    if let Some(parsed) = parse_relaxed_object_literal(text) {
+        return Some(parsed);
+    }
+
+    None
+}
+
 /// Upload and convert a PDF
 async fn upload_and_convert(
     State(state): State<Arc<AppState>>,
@@ -558,8 +694,10 @@ async fn upload_and_convert(
             }
             "options" => {
                 if let Ok(text) = field.text().await {
-                    if let Ok(parsed) = serde_json::from_str(&text) {
+                    if let Some(parsed) = parse_convert_options(&text) {
                         options = parsed;
+                    } else {
+                        eprintln!("Warning: Failed to parse convert options payload: {}", text);
                     }
                 }
             }
@@ -1171,6 +1309,51 @@ mod tests {
         let json = r#"{}"#;
         let request: BatchRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.priority, Priority::Normal);
+    }
+
+    #[test]
+    fn test_parse_convert_options_direct_object() {
+        let json = r#"{"dpi":300,"deskew":true,"upscale":false,"ocr":true,"advanced":false}"#;
+        let options = parse_convert_options(json).unwrap();
+        assert_eq!(options.dpi, 300);
+        assert!(options.deskew);
+        assert!(!options.upscale);
+        assert!(options.ocr);
+        assert!(!options.advanced);
+    }
+
+    #[test]
+    fn test_parse_convert_options_batch_wrapped_object() {
+        let json =
+            r#"{"options":{"dpi":300,"deskew":true,"upscale":false,"ocr":true,"advanced":false},"priority":"normal"}"#;
+        let options = parse_convert_options(json).unwrap();
+        assert_eq!(options.dpi, 300);
+        assert!(options.deskew);
+        assert!(!options.upscale);
+        assert!(options.ocr);
+        assert!(!options.advanced);
+    }
+
+    #[test]
+    fn test_parse_convert_options_double_encoded_json_string() {
+        let json = r#"\"{\\\"dpi\\\":300,\\\"deskew\\\":true,\\\"upscale\\\":false,\\\"ocr\\\":true,\\\"advanced\\\":false}\""#;
+        let options = parse_convert_options(json).unwrap();
+        assert_eq!(options.dpi, 300);
+        assert!(options.deskew);
+        assert!(!options.upscale);
+        assert!(options.ocr);
+        assert!(!options.advanced);
+    }
+
+    #[test]
+    fn test_parse_convert_options_relaxed_object_literal() {
+        let json = "{dpi:300,deskew:true,upscale:false,ocr:true,advanced:false}";
+        let options = parse_convert_options(json).unwrap();
+        assert_eq!(options.dpi, 300);
+        assert!(options.deskew);
+        assert!(!options.upscale);
+        assert!(options.ocr);
+        assert!(!options.advanced);
     }
 
     // TC-BATCH-API-008: AppState includes batch queue

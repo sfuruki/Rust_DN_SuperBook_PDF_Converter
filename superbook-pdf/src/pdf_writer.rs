@@ -409,9 +409,17 @@ impl PrintPdfWriter {
             "Layer 1",
         );
 
-        // Load font once before the page loop (only if OCR layer is present)
-        let font = if options.ocr_layer.is_some() {
-            Some(Self::load_font(&doc, options.cjk_font_path.as_deref())?)
+        // Load font once before the page loop (only if OCR layer is present).
+        // Use built-in Helvetica for ASCII-only OCR to improve pdftotext extractability.
+        let font = if let Some(ref ocr_layer) = options.ocr_layer {
+            if Self::ocr_layer_contains_non_ascii(ocr_layer) {
+                Some(Self::load_font(&doc, options.cjk_font_path.as_deref())?)
+            } else {
+                Some(
+                    doc.add_builtin_font(printpdf::BuiltinFont::Helvetica)
+                        .map_err(|e| PdfWriterError::GenerationError(e.to_string()))?,
+                )
+            }
         } else {
             None
         };
@@ -632,6 +640,15 @@ impl PrintPdfWriter {
             doc.add_builtin_font(printpdf::BuiltinFont::Helvetica)
                 .map_err(|e| PdfWriterError::GenerationError(e.to_string()))
         }
+    }
+
+    fn ocr_layer_contains_non_ascii(layer: &OcrLayer) -> bool {
+        layer
+            .pages
+            .iter()
+            .flat_map(|p| p.blocks.iter())
+            .flat_map(|b| b.text.chars())
+            .any(|ch| !ch.is_ascii())
     }
 
     /// Add OCR text layer to a PDF page

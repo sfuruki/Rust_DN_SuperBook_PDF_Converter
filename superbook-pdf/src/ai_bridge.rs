@@ -1060,50 +1060,79 @@ impl AiBridge for HttpApiBridge {
         let start_time = Instant::now();
         let url = self.service_urls.get(&tool)
             .ok_or_else(|| AiBridgeError::ProcessFailed("Service URL not configured".into()))?;
+        std::fs::create_dir_all(output_dir)?;
         
         let mut processed = Vec::new();
         let mut failed = Vec::new();
 
         for input_file in input_files {
-            let res = match tool {
+            match tool {
                 AiTool::RealESRGAN => {
                     let opts = tool_options.downcast_ref::<crate::realesrgan::RealEsrganOptions>()
                         .ok_or_else(|| AiBridgeError::ProcessFailed("Invalid options for RealESRGAN".into()))?;
-                    
+
+                    let output_path = output_dir.join(format!(
+                        "{}{}x.png",
+                        input_file.file_stem().unwrap().to_string_lossy(),
+                        opts.scale
+                    ));
+
                     let payload = UpscaleRequest {
                         input_path: input_file.to_string_lossy().into(),
-                        // 🚀 修正: ファイル名形式を "{元ファイル名}{倍率}x.png" に変更します
-                        output_path: output_dir.join(format!(
-                            "{}{}x.png",            
-                            input_file.file_stem().unwrap().to_string_lossy(),
-                            opts.scale // 🚀 scale (2 または 4) をファイル名に含めます
-                        )).to_string_lossy().into(),
+                        output_path: output_path.to_string_lossy().into(),
                         scale: opts.scale,
                         tile: opts.tile_size,
                         model_name: opts.model.model_name().to_string(),
                         fp32: !opts.fp16,
                         gpu_id: opts.gpu_id.unwrap_or(0) as i32,
                     };
-                    self.client.post(format!("{}/upscale", url)).json(&payload).send().await
-                },
+
+                    match self.client.post(format!("{}/upscale", url)).json(&payload).send().await {
+                        Ok(resp) if resp.status().is_success() => processed.push(output_path),
+                        Ok(resp) => failed.push((input_file.clone(), format!("HTTP error: {}", resp.status()))),
+                        Err(e) => failed.push((input_file.clone(), e.to_string())),
+                    }
+                }
                 AiTool::YomiToku => {
                     let opts = tool_options.downcast_ref::<crate::yomitoku::YomiTokuOptions>()
                         .ok_or_else(|| AiBridgeError::ProcessFailed("Invalid options for YomiToku".into()))?;
-                    
+
                     let payload = OcrRequest {
                         input_path: input_file.to_string_lossy().to_string(),
                         gpu_id: opts.gpu_id.unwrap_or(0) as i32,
                         confidence: opts.confidence_threshold,
                         format: "json".into(),
                     };
-                    self.client.post(format!("{}/ocr", url)).json(&payload).send().await
-                }
-            };
 
-            match res {
-                Ok(resp) if resp.status().is_success() => processed.push(input_file.clone()),
-                Ok(resp) => failed.push((input_file.clone(), format!("HTTP error: {}", resp.status()))),
-                Err(e) => failed.push((input_file.clone(), e.to_string())),
+                    match self.client.post(format!("{}/ocr", url)).json(&payload).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            let stem = input_file
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "ocr_result".to_string());
+                            let output_json_path = output_dir.join(format!("{}.json", stem));
+
+                            match resp.text().await {
+                                Ok(body) => {
+                                    if let Err(e) = std::fs::write(&output_json_path, body) {
+                                        failed.push((
+                                            input_file.clone(),
+                                            format!("Failed to write OCR output: {}", e),
+                                        ));
+                                    } else {
+                                        processed.push(output_json_path);
+                                    }
+                                }
+                                Err(e) => failed.push((
+                                    input_file.clone(),
+                                    format!("Failed to read OCR response body: {}", e),
+                                )),
+                            }
+                        }
+                        Ok(resp) => failed.push((input_file.clone(), format!("HTTP error: {}", resp.status()))),
+                        Err(e) => failed.push((input_file.clone(), e.to_string())),
+                    }
+                }
             }
         }
 

@@ -79,6 +79,137 @@ def detect_text_direction(blocks: List[Dict]) -> str:
         return "mixed"
 
 
+def _sort_blocks_reading_order(blocks: List[Dict]) -> List[Dict]:
+    """Sort OCR blocks in natural reading order.
+
+    - horizontal: top-to-bottom, then left-to-right
+    - vertical: right-to-left columns, then top-to-bottom
+    - mixed: fallback to horizontal-like ordering
+    """
+    if not blocks:
+        return blocks
+
+    direction = detect_text_direction(blocks)
+
+    def center_xy(b: Dict[str, Any]) -> tuple:
+        bb = b.get("bbox", [0.0, 0.0, 0.0, 0.0])
+        try:
+            x1, y1, x2, y2 = float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3])
+            return ((x1 + x2) * 0.5, (y1 + y2) * 0.5)
+        except (TypeError, ValueError, IndexError):
+            return (0.0, 0.0)
+
+    if direction == "vertical":
+        # Prefer vertical blocks first. Then right-to-left columns, top-to-bottom.
+        return sorted(
+            blocks,
+            key=lambda b: (
+                0 if b.get("direction") == "vertical" else 1,
+                -round(center_xy(b)[0] / 24.0),
+                round(center_xy(b)[1] / 24.0),
+            ),
+        )
+
+    # horizontal or mixed fallback: prefer horizontal blocks first.
+    return sorted(
+        blocks,
+        key=lambda b: (
+            0 if b.get("direction") == "horizontal" else 1,
+            round(center_xy(b)[1] / 24.0),
+            round(center_xy(b)[0] / 24.0),
+        ),
+    )
+
+
+def _should_keep_word(text: str, confidence: float, confidence_threshold: float) -> bool:
+    """Keep words using threshold with salvage for long low-confidence lines."""
+    if confidence >= confidence_threshold:
+        return True
+
+    # Many book lines are long but scored slightly low; keep them if score is not too low.
+    compact = "".join(text.split())
+    if len(compact) >= 18 and confidence >= 0.30:
+        return True
+
+    return False
+
+
+def _normalize_bbox(box_like: Any) -> List[float]:
+    """Normalize various bbox representations to [x1, y1, x2, y2]."""
+    if box_like is None:
+        return [0.0, 0.0, 0.0, 0.0]
+
+    # points=[[x,y], ...] or [[x,y], ...]
+    points = getattr(box_like, "points", None)
+    if points is None and isinstance(box_like, (list, tuple)) and box_like and isinstance(box_like[0], (list, tuple)):
+        points = box_like
+    if points is not None:
+        xs = []
+        ys = []
+        for p in points:
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                try:
+                    xs.append(float(p[0]))
+                    ys.append(float(p[1]))
+                except (TypeError, ValueError):
+                    continue
+        if xs and ys:
+            return [min(xs), min(ys), max(xs), max(ys)]
+
+    # Object-style x/y/w/h or left/top/right/bottom
+    for attrs in (("x", "y", "w", "h"), ("left", "top", "right", "bottom")):
+        if all(hasattr(box_like, a) for a in attrs):
+            try:
+                a0 = float(getattr(box_like, attrs[0]))
+                a1 = float(getattr(box_like, attrs[1]))
+                a2 = float(getattr(box_like, attrs[2]))
+                a3 = float(getattr(box_like, attrs[3]))
+                if attrs == ("x", "y", "w", "h"):
+                    return [a0, a1, a0 + a2, a1 + a3]
+                return [a0, a1, a2, a3]
+            except (TypeError, ValueError):
+                break
+
+    # Dict-style boxes
+    if isinstance(box_like, dict):
+        keys = box_like.keys()
+        if all(k in keys for k in ("x", "y", "w", "h")):
+            try:
+                x = float(box_like["x"])
+                y = float(box_like["y"])
+                w = float(box_like["w"])
+                h = float(box_like["h"])
+                return [x, y, x + w, y + h]
+            except (TypeError, ValueError):
+                pass
+        if all(k in keys for k in ("left", "top", "right", "bottom")):
+            try:
+                return [
+                    float(box_like["left"]),
+                    float(box_like["top"]),
+                    float(box_like["right"]),
+                    float(box_like["bottom"]),
+                ]
+            except (TypeError, ValueError):
+                pass
+
+    # Flat list/tuple: [x1,y1,x2,y2] or [x,y,w,h]
+    if isinstance(box_like, (list, tuple)) and len(box_like) >= 4:
+        try:
+            x0 = float(box_like[0])
+            y0 = float(box_like[1])
+            x2 = float(box_like[2])
+            y2 = float(box_like[3])
+            if x2 <= x0 or y2 <= y0:
+                # Assume [x, y, w, h]
+                return [x0, y0, x0 + x2, y0 + y2]
+            return [x0, y0, x2, y2]
+        except (TypeError, ValueError):
+            return [0.0, 0.0, 0.0, 0.0]
+
+    return [0.0, 0.0, 0.0, 0.0]
+
+
 def process_image(
     input_path: Path,
     output_format: str = "json",
@@ -146,84 +277,55 @@ def process_image(
 #            text_blocks.append(block)
 #            full_text.append(text)
 
-        # YomiToku 0.10+ は結果をタプルで返す場合があるため補正 [1]
-        result = result_tuple if isinstance(result_tuple, tuple) else result_tuple
+        # YomiToku 0.10+ returns (DocumentAnalyzerSchema, None, None).
+        if isinstance(result_tuple, tuple):
+            result = result_tuple[0] if len(result_tuple) > 0 else None
+        else:
+            result = result_tuple
 
         text_blocks = []
         full_text = []
 
-        # 1. ページ全体の 'lines' 属性（行単位）を優先的に取得
-        lines = getattr(result, "lines", [])
+        # 1) Word-level extraction first to maximize OCR coverage for searchable PDF.
+        for word in getattr(result, "words", []):
+            text = getattr(word, "content", "")
+            if not text:
+                continue
 
-        # 2. lines が直接取れない場合は段落 (paragraphs) の中から集約する
-        if not lines:
-            for para in getattr(result, "paragraphs", []):
-                lines.extend(getattr(para, "lines", []))
+            confidence = float(getattr(word, "rec_score", 1.0))
+            if not _should_keep_word(text, confidence, confidence_threshold):
+                continue
 
-        # 3. 集まった全行をループで処理して text_blocks を構築
-        for line in lines:
-            # 矩形情報の取得。属性がなければ [ZERO, ZERO, ZERO, ZERO] をデフォルトにする
-            box = line.box if hasattr(line, "box") else getattr(line, "bbox", [0, 0, 0, 0])
-
-            if hasattr(box, "__iter__") and not isinstance(box, str):
-                box_list = list(box)
-            else:
-                # 座標が不明な場合の安全なデフォルト値
-                box_list = [0, 0, 0, 0]
-
-            # テキスト内容と文字方向を取得
-            text = line.contents if hasattr(line, "contents") else str(line)
-            direction = getattr(line, "direction", "horizontal")
-
+            box = getattr(word, "box", getattr(word, "points", None))
+            direction = getattr(word, "direction", "horizontal")
             text_blocks.append({
                 "text": text,
-                "bbox": box_list,
-                "confidence": 1.0, # YomiToku 0.10+ 仕様 [1]
+                "bbox": _normalize_bbox(box),
+                "confidence": confidence,
                 "direction": direction,
             })
             full_text.append(text)
 
-        # 4. 行単位でもテキストが取れなかった場合、単語 (words) 単位でフォールバック
+        # 2) Fallback: paragraph-level extraction if words are unavailable.
         if not text_blocks:
-            for word in getattr(result, "words", []):
-                box = word.box if hasattr(word, "box") else getattr(word, "bbox", [0, 0, 0, 0])
-                if hasattr(box, "__iter__") and not isinstance(box, str):
-                    box_list = list(box)
-                else:
-                    box_list = [0, 0, 0, 0]
+            for para in getattr(result, "paragraphs", []):
+                text = getattr(para, "contents", "")
+                if not text:
+                    continue
 
-                text = word.content if hasattr(word, "content") else str(word)
-                direction = getattr(word, "direction", "horizontal")
-
+                box = getattr(para, "box", getattr(para, "bbox", None))
+                direction = getattr(para, "direction", "horizontal")
                 text_blocks.append({
                     "text": text,
-                    "bbox": box_list,
+                    "bbox": _normalize_bbox(box),
                     "confidence": 1.0,
                     "direction": direction,
                 })
                 full_text.append(text)
 
-        elapsed = time.time() - start_time # [2]
-        # Also process individual words if no paragraphs found
-        if not text_blocks:
-            for word in getattr(result, "words", []):
-                box = word.box if hasattr(word, "box") else getattr(word, "bbox", [0, 0, 0, 0])
-                if hasattr(box, "__iter__") and not isinstance(box, str):
-                    box_list = list(box)
-                else:
-                    box_list = [0, 0, 0, 0]
-                    
-                text = word.content if hasattr(word, "content") else str(word)
-                direction = getattr(word, "direction", "horizontal")
-                
-                block = {
-                    "text": text,
-                    "bbox": box_list,
-                    "confidence": 1.0,
-                    "direction": direction,
-                }
-                text_blocks.append(block)
-                full_text.append(text)
+        # Normalize reading order before exporting to Rust side.
+        text_blocks = _sort_blocks_reading_order(text_blocks)
+        full_text = [b.get("text", "") for b in text_blocks if b.get("text", "")]
 
         elapsed = time.time() - start_time
 

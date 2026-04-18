@@ -146,15 +146,28 @@ impl WebServer {
         let addr = self.config.socket_addr()?;
         let router = self.build_router();
 
-        println!("Starting server on http://{}", addr);
+        println!("Starting SuperBook PDF Converter v{} on http://{}", env!("CARGO_PKG_VERSION"), addr);
+        println!();
         println!("API endpoints:");
-        println!("  POST /api/convert     - Upload and convert PDF");
-        println!("  GET  /api/jobs/:id    - Get job status");
-        println!("  DELETE /api/jobs/:id  - Cancel job");
-        println!("  GET  /api/jobs/:id/download - Download result");
-        println!("  GET  /api/health      - Health check");
+        println!("  POST   /api/convert               - PDF変換開始");
+        println!("  GET    /api/jobs/:id               - ジョブ状態取得");
+        println!("  DELETE /api/jobs/:id               - ジョブキャンセル");
+        println!("  POST   /api/jobs/:id/retry         - ジョブリトライ");
+        println!("  GET    /api/jobs/:id/download      - 変換結果ダウンロード");
+        println!("  GET    /api/jobs/history           - ジョブ履歴取得");
+        println!("  POST   /api/batch                  - バッチ作成");
+        println!("  GET    /api/batch/:id              - バッチ状態取得");
+        println!("  DELETE /api/batch/:id              - バッチキャンセル");
+        println!("  GET    /api/batch/:id/jobs         - バッチジョブ一覧");
+        println!("  GET    /api/health                 - ヘルスチェック (AIサービス含む)");
+        println!("  GET    /api/metrics                - Prometheusメトリクス");
+        println!("  GET    /api/stats                  - JSON統計情報");
+        println!("  GET    /api/rate-limit/status      - レートリミット状態");
+        println!("  GET    /api/auth/status            - 認証状態");
         println!("WebSocket endpoints:");
-        println!("  WS   /ws/jobs/:id     - Real-time job progress");
+        println!("  WS     /ws/jobs/:id                - ジョブ進捗リアルタイム");
+        println!("  WS     /ws/batch/:id               - バッチ進捗リアルタイム");
+        println!();
         println!("Press Ctrl+C to shutdown gracefully");
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
