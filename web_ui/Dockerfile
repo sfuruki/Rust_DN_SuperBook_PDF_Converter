@@ -19,7 +19,9 @@ COPY default.conf.template /etc/nginx/templates/default.conf.template
 COPY static/ /usr/share/nginx/html/
 
 # 6. バックエンド（Rust Core）接続用のデフォルト値
-ENV BACKEND_HOST=rust-core
+# 注: Docker Compose ネットワークではサービス名が DNS 名として使用される
+# docker-compose.yml の service 名: rust-core-stable
+ENV BACKEND_HOST=rust-core-stable
 ENV BACKEND_PORT=8080
 
 # HTTP ポートの公開

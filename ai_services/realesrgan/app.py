@@ -70,12 +70,15 @@ async def upscale(req: UpscaleRequest):
     effective_model_name = model_mapping.get(req.model_name, req.model_name)
     
     print(f"DEBUG: Received: {req.model_name} -> Mapped to: {effective_model_name}")
+    print(f"DEBUG: Request payload: input_path={req.input_path}, output_path={req.output_path}, scale={req.scale}")
 
     input_p = Path(req.input_path)
     output_p = Path(req.output_path)
 
+    print(f"DEBUG: Checking input file: {input_p.absolute()}, exists={input_p.exists()}")
     if not input_p.exists():
-        raise HTTPException(status_code=404, detail=f"Input file not found: {req.input_path}")
+        print(f"ERROR: Input file not found: {req.input_path}")
+        raise HTTPException(status_code=400, detail=f"Input file not found: {req.input_path}")
 
     try:
         # 変換後のモデル名を使用してブリッジを呼び出す
@@ -88,9 +91,12 @@ async def upscale(req: UpscaleRequest):
             gpu_id=req.gpu_id,
             fp32=req.fp32
         )
+        print(f"DEBUG: Upscale completed: {result}")
         return result
     except Exception as e:
         print(f"ERROR during upscale: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

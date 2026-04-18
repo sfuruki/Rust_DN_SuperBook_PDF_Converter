@@ -36,13 +36,18 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
+        let work_dir = match std::env::var("SUPERBOOK_WORK_DIR") {
+            Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
+            _ => std::env::temp_dir().join("superbook-pdf"),
+        };
+
         Self {
             port: DEFAULT_PORT,
             bind: DEFAULT_BIND.to_string(),
             workers: num_cpus::get(),
             upload_limit: DEFAULT_UPLOAD_LIMIT,
             job_timeout: super::DEFAULT_JOB_TIMEOUT,
-            work_dir: std::env::temp_dir().join("superbook-pdf"),
+            work_dir,
             cors: CorsConfig::default(),
             shutdown: ShutdownConfig::default(),
         }
