@@ -3,6 +3,7 @@
 //! Handles the actual PDF conversion in a background task.
 
 use std::path::PathBuf;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -29,41 +30,104 @@ pub enum WorkerMessage {
 struct WebProgressCallback {
     job_id: Uuid,
     queue: JobQueue,
+    broadcaster: Arc<WsBroadcaster>,
     current_step: AtomicU32,
     total_steps: AtomicU32,
     step_progress: AtomicUsize,
     step_total: AtomicUsize,
+    step_name: RwLock<String>,
 }
 
 impl WebProgressCallback {
-    fn new(job_id: Uuid, queue: JobQueue) -> Self {
+    fn new(job_id: Uuid, queue: JobQueue, broadcaster: Arc<WsBroadcaster>) -> Self {
         Self {
             job_id,
             queue,
+            broadcaster,
             current_step: AtomicU32::new(1),
             total_steps: AtomicU32::new(13),
             step_progress: AtomicUsize::new(0),
             step_total: AtomicUsize::new(0),
+            step_name: RwLock::new("Starting".to_string()),
         }
+    }
+
+    fn build_progress(
+        &self,
+        current_step: u32,
+        step_name: String,
+        item_current: usize,
+        item_total: usize,
+    ) -> Progress {
+        let total_steps = self.total_steps.load(Ordering::Relaxed);
+        let percent = if total_steps == 0 {
+            0
+        } else if item_total > 0 {
+            let fraction = item_current as f32 / item_total as f32;
+            let overall = ((current_step.saturating_sub(1)) as f32 + fraction) / total_steps as f32;
+            (overall.clamp(0.0, 1.0) * 100.0) as u8
+        } else {
+            (((current_step as f32) / total_steps as f32) * 100.0) as u8
+        };
+
+        Progress {
+            current_step,
+            total_steps,
+            step_name,
+            percent,
+        }
+    }
+
+    fn publish_progress(&self, progress: Progress) {
+        self.queue.update(self.job_id, |job| {
+            job.update_progress(progress.clone());
+        });
+
+        let broadcaster = self.broadcaster.clone();
+        let job_id = self.job_id;
+        let current_step = progress.current_step;
+        let total_steps = progress.total_steps;
+        let step_name = progress.step_name.clone();
+        let percent = progress.percent;
+
+        tokio::spawn(async move {
+            broadcaster
+                .broadcast_progress_precise(job_id, current_step, total_steps, &step_name, percent)
+                .await;
+        });
     }
 }
 
 impl ProgressCallback for WebProgressCallback {
     fn on_step_start(&self, step: &str) {
         let current = self.current_step.fetch_add(1, Ordering::Relaxed);
-        let total = self.total_steps.load(Ordering::Relaxed);
         self.step_progress.store(0, Ordering::Relaxed);
         self.step_total.store(0, Ordering::Relaxed);
+        if let Ok(mut step_name) = self.step_name.write() {
+            *step_name = step.to_string();
+        }
 
-        let progress = Progress::new(current, total, step);
-        self.queue.update(self.job_id, |job| {
-            job.update_progress(progress);
-        });
+        let progress = self.build_progress(current, step.to_string(), 0, 0);
+        self.publish_progress(progress);
     }
 
     fn on_step_progress(&self, current: usize, total: usize) {
         self.step_progress.store(current, Ordering::Relaxed);
         self.step_total.store(total, Ordering::Relaxed);
+
+        let active_step = self.current_step.load(Ordering::Relaxed).saturating_sub(1);
+        let base_name = self
+            .step_name
+            .read()
+            .map(|name| name.clone())
+            .unwrap_or_else(|_| "Processing".to_string());
+        let display_name = if total > 0 {
+            format!("{} ({}/{})", base_name, current, total)
+        } else {
+            base_name
+        };
+        let progress = self.build_progress(active_step, display_name, current, total);
+        self.publish_progress(progress);
     }
 
     fn on_step_complete(&self, _step: &str, _message: &str) {
@@ -180,7 +244,7 @@ impl JobWorker {
         let pipeline = PdfPipeline::new(config);
 
         // Create progress callback
-        let progress = WebProgressCallback::new(job_id, self.queue.clone());
+        let progress = WebProgressCallback::new(job_id, self.queue.clone(), self.broadcaster.clone());
 
         // Run pipeline directly (it handles its own async/blocking balance)
         let result = pipeline.process_with_progress(&input_path, &output_dir, &progress).await;

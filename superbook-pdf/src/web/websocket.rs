@@ -161,6 +161,20 @@ impl WsBroadcaster {
             0
         };
 
+        self.broadcast_progress_precise(job_id, current_step, total_steps, step_name, percent)
+            .await;
+    }
+
+    /// Broadcast progress update with explicit percent
+    pub async fn broadcast_progress_precise(
+        &self,
+        job_id: Uuid,
+        current_step: u32,
+        total_steps: u32,
+        step_name: &str,
+        percent: u8,
+    ) {
+
         self.broadcast(
             job_id,
             WsMessage::Progress {

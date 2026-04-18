@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
+use tokio::time::{Duration, Instant as TokioInstant};
 use crate::cli::ConvertArgs;
 use crate::ai_bridge::AiBridge;
 // 🚀 追加: upscale_batch メソッドを使用するためにトレイトをスコープに入れる
@@ -1247,16 +1248,57 @@ impl PdfPipeline {
         }
         let options = options.build();
 
-        match esrgan.upscale_batch(images, &upscaled_dir, &options, None).await {
-            Ok(result) => {
-                progress.on_step_complete("超解像", &format!("{}画像", result.successful.len()));
-                Ok(result.successful.iter().map(|r| r.output_path.clone()).collect())
+        let mut output_paths = Vec::with_capacity(images.len());
+        progress.on_step_progress(0, images.len());
+
+        for (index, input_path) in images.iter().enumerate() {
+            let output_path = upscaled_dir.join(format!(
+                "{}{}x.png",
+                input_path.file_stem().unwrap_or_default().to_string_lossy(),
+                options.scale
+            ));
+
+            let upscale_future = esrgan.upscale(input_path, &output_path, &options);
+            tokio::pin!(upscale_future);
+
+            let page_number = index + 1;
+            let total_pages = images.len();
+            let heartbeat_start = TokioInstant::now();
+            let mut heartbeat = tokio::time::interval(Duration::from_secs(3));
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            let upscale_result = loop {
+                tokio::select! {
+                    result = &mut upscale_future => break result,
+                    _ = heartbeat.tick() => {
+                        let elapsed_secs = heartbeat_start.elapsed().as_secs();
+                        let estimated_ticks = (elapsed_secs / 3).min(9) as usize;
+                        let synthetic_current = index.saturating_mul(10) + estimated_ticks;
+                        let synthetic_total = total_pages.saturating_mul(10).max(1);
+                        progress.on_step_progress(synthetic_current, synthetic_total);
+                        progress.on_debug(&format!(
+                            "AI Upscaling page {}/{} running for {}s",
+                            page_number,
+                            total_pages,
+                            elapsed_secs
+                        ));
+                    }
+                }
+            };
+
+            match upscale_result {
+                Ok(result) => output_paths.push(result.output_path),
+                Err(e) => {
+                    progress.on_warning(&format!("超解像失敗: {}", e));
+                    output_paths.push(input_path.clone());
+                }
             }
-            Err(e) => {
-                progress.on_warning(&format!("超解像失敗: {}", e));
-                Ok(images.to_vec())
-            }
+
+            progress.on_step_progress((index + 1) * 10, images.len().saturating_mul(10).max(1));
         }
+
+        progress.on_step_complete("超解像", &format!("{}画像", output_paths.len()));
+        Ok(output_paths)
     }
 
     /// Step 6: Internal resolution normalization (skip blank pages)

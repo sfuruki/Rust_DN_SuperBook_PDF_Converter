@@ -980,17 +980,15 @@ impl AiBridge for HttpApiBridge {
 
                         let version_ok = match tool {
                             AiTool::RealESRGAN => {
-                                // RealESRGAN は Torch 1.x を期待 [構築方針]
-                                if torch_major_version >= 2 {
+                                // 現行マイクロサービス構成では RealESRGAN は Torch 2.x + CUDA 11.8 を使用する。
+                                // 旧来の Torch 1.x 前提警告は現状と合っておらず、運用判断を誤らせるため出さない。
+                                if torch_major_version == 0 {
                                     eprintln!(
-                                        "⚠️  WARNING: {} is running on Torch {}, expected Torch 1.x. \
-                                         This may cause compatibility issues.",
+                                        "⚠️  WARNING: {} returned an unknown Torch version: {}",
                                         tool, torch_version
                                     );
-                                    true // 警告だが続行
-                                } else {
-                                    true
                                 }
+                                true
                             }
                             AiTool::YomiToku => {
                                 // YomiToku は Torch 2.x を期待 [構築方針]
