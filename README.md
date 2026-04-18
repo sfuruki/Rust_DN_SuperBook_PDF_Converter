@@ -304,7 +304,7 @@ superbook-pdf serve --port 8080 --bind 0.0.0.0
 |------|--------|
 | `pdftoppm: command not found` | `sudo apt install poppler-utils` |
 | RealESRGAN が動かない | `docker compose ps` と `superbook-pdf info` で AI Services の状態を確認 |
-| GPU が使用されない | `pip install torch --index-url https://download.pytorch.org/whl/cu121` |
+| GPU が使用されない | `docker compose ps` と `nvidia-smi` でコンテナ/ドライバ状態を確認し、必要なら CPU override (`-f docker-compose.cpu.yml`) を使用 |
 | メモリ不足 | `--max-pages 10` か `--chunk-size 5` で分割処理 |
 | 傾き補正で画像が崩れる | `--no-deskew` で無効化 |
 | マージンで文字が切れる | `--margin-safety 1.0` で安全バッファを増加 |

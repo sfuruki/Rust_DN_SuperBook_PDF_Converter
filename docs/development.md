@@ -111,11 +111,12 @@ superbook-pdf/
 │       └── ...                # API/WS 補助モジュール
 ├── tests/                     # 統合テスト
 ├── specs/                     # TDD 仕様
-└── docker/
-    └── backend/
-        ├── Dockerfile         # NVIDIA GPU
-        ├── Dockerfile.cpu     # CPU
-        └── Dockerfile.rocm    # AMD GPU
+└── Dockerfile                 # NVIDIA (デフォルト)
+
+../docker/
+└── backend/
+    ├── Dockerfile.cpu         # CPU
+    └── Dockerfile.rocm        # AMD GPU
 ```
 
 ---

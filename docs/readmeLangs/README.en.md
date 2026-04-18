@@ -301,7 +301,7 @@ superbook-pdf serve --port 8080 --bind 0.0.0.0
 |---------|----------|
 | `pdftoppm: command not found` | `sudo apt install poppler-utils` |
 | RealESRGAN not working | Check AI Services with `docker compose ps` and `superbook-pdf info` |
-| GPU not being used | `pip install torch --index-url https://download.pytorch.org/whl/cu121` |
+| GPU not being used | Check `docker compose ps` and `nvidia-smi`; if needed, use CPU override (`-f docker-compose.cpu.yml`) |
 | Out of memory | Use `--max-pages 10` or `--chunk-size 5` for chunked processing |
 | Deskew distorts image | Disable with `--no-deskew` |
 | Margins clip text | Increase safety buffer with `--margin-safety 1.0` |
