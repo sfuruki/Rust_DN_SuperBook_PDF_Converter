@@ -11,11 +11,11 @@
 #   - /dev/kfd と /dev/dri が利用可能
 
 services:
-  backend:
+  rust-core-stable:
     build:
-      context: superbook-pdf
+      context: ./superbook-pdf
       dockerfile: docker/backend/Dockerfile.rocm
-    image: superbook-pdf-backend-rocm:latest
+    image: superbook-rust-core-rocm:latest
 
     # GPU設定を削除（NVIDIA用）
     deploy: {}

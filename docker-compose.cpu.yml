@@ -7,11 +7,13 @@
 #   podman compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
 
 services:
-  backend:
-    # CPU専用Dockerfileでビルド (ubuntu:22.04 ベース、CUDA不要)
+  rust-core-stable:
+    # CPU専用Dockerfileでビルド
     build:
-      context: superbook-pdf
+      context: ./superbook-pdf
       dockerfile: docker/backend/Dockerfile.cpu
+
+    image: superbook-rust-core-cpu:latest
 
     # GPU設定を削除
     deploy: {}
