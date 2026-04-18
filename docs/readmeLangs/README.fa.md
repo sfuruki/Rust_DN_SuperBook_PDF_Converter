@@ -78,7 +78,7 @@ superbook-pdf convert input.pdf -o output/ --advanced --ocr
 superbook-pdf markdown input.pdf -o markdown_output/
 
 # راه‌اندازی رابط وب
-superbook-pdf serve --port 8080
+docker compose up -d
 ```
 
 </div>
