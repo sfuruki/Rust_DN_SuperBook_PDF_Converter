@@ -2,6 +2,9 @@ server {
     listen 80;
     server_name localhost;
 
+    # Match backend RequestBodyLimitLayer (500MB) to avoid 413 at proxy.
+    client_max_body_size 500m;
+
     # フロントエンド（静的ファイル）の配信
     location / {
         root   /usr/share/nginx/html;

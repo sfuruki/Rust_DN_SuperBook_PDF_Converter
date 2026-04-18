@@ -674,7 +674,19 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error('Upload failed');
+                    let detail = '';
+                    try {
+                        detail = await response.text();
+                    } catch (_) {
+                        detail = '';
+                    }
+
+                    if (response.status === 413) {
+                        throw new Error('Upload failed: file is too large (HTTP 413)');
+                    }
+
+                    const suffix = detail ? ': ' + detail.slice(0, 200) : '';
+                    throw new Error('Upload failed (HTTP ' + response.status + ')' + suffix);
                 }
 
                 const data = await response.json();

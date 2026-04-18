@@ -670,8 +670,16 @@ async fn upload_and_convert(
         match name.as_str() {
             "file" => {
                 filename = field.file_name().unwrap_or("upload.pdf").to_string();
-                if let Ok(data) = field.bytes().await {
-                    file_data = Some(data.to_vec());
+                match field.bytes().await {
+                    Ok(data) => {
+                        file_data = Some(data.to_vec());
+                    }
+                    Err(e) => {
+                        return Err(AppError::BadRequest(format!(
+                            "Failed to read uploaded file data: {}",
+                            e
+                        )));
+                    }
                 }
             }
             "options" => {
@@ -898,9 +906,17 @@ async fn create_batch(
         match name.as_str() {
             "files[]" | "files" => {
                 let filename = field.file_name().unwrap_or("upload.pdf").to_string();
-                if let Ok(data) = field.bytes().await {
-                    file_data_list.push((filename.clone(), data.to_vec()));
-                    filenames.push(filename);
+                match field.bytes().await {
+                    Ok(data) => {
+                        file_data_list.push((filename.clone(), data.to_vec()));
+                        filenames.push(filename);
+                    }
+                    Err(e) => {
+                        return Err(AppError::BadRequest(format!(
+                            "Failed to read uploaded file data: {}",
+                            e
+                        )));
+                    }
                 }
             }
             "options" => {
