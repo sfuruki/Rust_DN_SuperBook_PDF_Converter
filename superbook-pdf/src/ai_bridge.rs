@@ -33,6 +33,7 @@ use thiserror::Error;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use async_trait::async_trait;
+use tokio;
 
 // ============================================================
 // Constants
@@ -946,17 +947,104 @@ impl AiBridge for HttpApiBridge {
         let url = self.service_urls.get(&tool)
             .ok_or_else(|| AiBridgeError::ProcessFailed("Service URL not configured".into()))?;
         
-        match self.client.get(format!("{}/version", url)).timeout(Duration::from_secs(5)).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(info) = resp.json::<serde_json::Value>().await {
-                    let torch = info.get("torch_version").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let cuda = info.get("cuda_available").and_then(|v| v.as_bool()).unwrap_or(false);
-                    println!("  ✨ {} API: Version={}, CUDA={}", tool, torch, if cuda { "✅" } else { "❌" });
+        // ハンドシェイク: 最大3回までリトライ [構築方針]
+        for attempt in 1..=3 {
+            match self.client
+                .get(format!("{}/version", url))
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(info) = resp.json::<serde_json::Value>().await {
+                        // Torch バージョンを抽出 [構築方針 提案8]
+                        let torch_version = info
+                            .get("torch_version")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let cuda_available = info
+                            .get("cuda_available")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let device = info
+                            .get("device")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+
+                        // バージョン互換性チェック [構築方針 提案8]
+                        let torch_major_version = torch_version
+                            .split('.')
+                            .next()
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .unwrap_or(0);
+
+                        let version_ok = match tool {
+                            AiTool::RealESRGAN => {
+                                // RealESRGAN は Torch 1.x を期待 [構築方針]
+                                if torch_major_version >= 2 {
+                                    eprintln!(
+                                        "⚠️  WARNING: {} is running on Torch {}, expected Torch 1.x. \
+                                         This may cause compatibility issues.",
+                                        tool, torch_version
+                                    );
+                                    true // 警告だが続行
+                                } else {
+                                    true
+                                }
+                            }
+                            AiTool::YomiToku => {
+                                // YomiToku は Torch 2.x を期待 [構築方針]
+                                if torch_major_version < 2 {
+                                    eprintln!(
+                                        "⚠️  WARNING: {} is running on Torch {}, expected Torch 2.x. \
+                                         This may cause compatibility issues.",
+                                        tool, torch_version
+                                    );
+                                    true // 警告だが続行
+                                } else {
+                                    true
+                                }
+                            }
+                        };
+
+                        if version_ok {
+                            println!(
+                                "  ✨ {} API: Torch={}, CUDA={}, Device={}",
+                                tool,
+                                torch_version,
+                                if cuda_available { "✅" } else { "❌" },
+                                device
+                            );
+                            return Ok(true);
+                        }
+                    }
+                    return Ok(true);
                 }
-                Ok(true)
-            },
-            _ => Ok(false),
+                Err(e) if attempt < 3 => {
+                    // リトライ [構築方針]
+                    eprintln!(
+                        "⚠️  Attempt {}/3 failed to reach {}: {}. Retrying...",
+                        attempt, tool, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(attempt as u64)).await;
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to reach {} API after 3 attempts: {}", tool, e);
+                    return Ok(false);
+                }
+                Ok(resp) => {
+                    eprintln!(
+                        "❌ {} API returned error: {}",
+                        tool,
+                        resp.status()
+                    );
+                    return Ok(false);
+                }
+            }
         }
+
+        Ok(false)
     }
 
     async fn check_gpu(&self) -> Result<GpuStats> {
@@ -1085,5 +1173,48 @@ impl HttpApiBridge {
                 .map_err(|e| AiBridgeError::ProcessFailed(e.to_string()))?,
             service_urls,
         })
+    }
+
+    /// ハンドシェイク：起動時に全AIサービスの互換性を確認 [構築方針]
+    pub async fn handshake(&self) -> Result<()> {
+        println!("🔗 Starting AI Service Handshake...");
+        println!();
+
+        let mut all_ok = true;
+
+        // RealESRGAN チェック
+        println!("Checking RealESRGAN (Torch 1.x / CUDA 11.8)...");
+        match self.check_tool(AiTool::RealESRGAN).await {
+            Ok(true) => {
+                println!("  ✅ RealESRGAN OK");
+            }
+            _ => {
+                eprintln!("  ❌ RealESRGAN NOT READY");
+                all_ok = false;
+            }
+        }
+        println!();
+
+        // YomiToku チェック
+        println!("Checking YomiToku (Torch 2.x / CUDA 12.1)...");
+        match self.check_tool(AiTool::YomiToku).await {
+            Ok(true) => {
+                println!("  ✅ YomiToku OK");
+            }
+            _ => {
+                eprintln!("  ❌ YomiToku NOT READY");
+                all_ok = false;
+            }
+        }
+        println!();
+
+        if all_ok {
+            println!("✅ All AI Services Ready!");
+            Ok(())
+        } else {
+            eprintln!("⚠️  Some AI Services are not ready. Proceeding anyway...");
+            // 警告だが、部分的に利用可能な状況で続行することを許可
+            Ok(())
+        }
     }
 }

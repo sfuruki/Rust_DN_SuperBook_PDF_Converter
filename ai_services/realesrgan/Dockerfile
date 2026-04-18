@@ -16,13 +16,13 @@ ENV PATH="/root/.local/bin:$PATH"
 # 3. 依存関係のコピー
 COPY requirements.txt .
 
-# 4. 【最重要】元ソースのインストール順序を再現 [5]
-# まず、問題の basicsr を含む realesrgan をインストールし、
-# その後、正しい torch バージョンを --force-reinstall で強制固定します。
-RUN uv pip install --system --no-cache realesrgan && \
-    uv pip install --system --no-cache --force-reinstall \
+# 4. 【最重要】前に解決した方針に完全に従う [5]
+# 順序: Torch先行インストール → realesrgan → requirements.txt
+# 注: CUDA 11.8 + Torch 2.0.1 を使用（YomiToku と別コンテナで物理的に分離）[構築方針]
+RUN uv pip install --system --no-cache \
     torch==2.0.1+cu118 torchvision==0.15.2+cu118 \
     --index-url https://download.pytorch.org/whl/cu118 && \
+    uv pip install --system --no-cache realesrgan && \
     uv pip install --system --no-cache -r requirements.txt
 
 # 5. ソースコードのコピーとディレクトリ作成 [8]

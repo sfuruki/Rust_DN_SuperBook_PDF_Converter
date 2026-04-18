@@ -1907,12 +1907,12 @@ mod tests {
         assert_eq!(output_path, PathBuf::from("/output/document_converted.pdf"));
     }
 
-    #[test]
-    fn test_pdf_pipeline_process_input_not_found() {
+    #[tokio::test]
+    async fn test_pdf_pipeline_process_input_not_found() {
         let config = PipelineConfig::default();
         let pipeline = PdfPipeline::new(config);
 
-        let result = pipeline.process(Path::new("/nonexistent/file.pdf"), Path::new("/output"));
+        let result = pipeline.process(Path::new("/nonexistent/file.pdf"), Path::new("/output")).await;
 
         assert!(matches!(result, Err(PipelineError::InputNotFound(_))));
     }

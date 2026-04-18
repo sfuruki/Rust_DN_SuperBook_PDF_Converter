@@ -11,6 +11,7 @@ services:
     image: superbook-frontend:latest
     container_name: superbook-web-ui
     restart: unless-stopped
+    # 注: rust-core-stable が healthy になるまで待機 [構築方針]
     depends_on:
       rust-core-stable:
         condition: service_healthy
@@ -18,6 +19,12 @@ services:
       - "${SUPERBOOK_PORT:-8080}:80"
     networks:
       - superbook-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # =============================================================
   # 2. Orchestrator: Rust Core
@@ -29,6 +36,7 @@ services:
     image: superbook-rust-core:latest
     container_name: superbook-rust-core
     restart: unless-stopped
+    # 注: AIサービスが両方 healthy になるまで待機 [構築方針]
     depends_on:
       realesrgan-api:
         condition: service_healthy
@@ -37,7 +45,7 @@ services:
     environment:
       - RUST_LOG=info
       - SUPERBOOK_WORK_DIR=/data/work
-      # マイクロサービス間の通信用URL
+      # マイクロサービス間の通信用URL [構築方針]
       - REALESRGAN_API_URL=http://realesrgan-api:8000
       - YOMITOKU_API_URL=http://yomitoku-api:8000
     volumes:
@@ -47,14 +55,17 @@ services:
     networks:
       - superbook-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/stats"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
 
   # =============================================================
-  # 3. AI Service: Upscale (RealESRGAN / Torch 1.x)
+  # 3. AI Service: Upscale (RealESRGAN / Torch 2.0.1 / CUDA 11.8)
   # =============================================================
+  # 注: 前に解決した方針に従い、Torch 2.0.1+cu118 を使用
+  # YomiToku との環境分離により、ライブラリ衝突を回避 [構築方針]
   realesrgan-api:
     build:
       context: ./ai_services/realesrgan
@@ -77,14 +88,16 @@ services:
     networks:
       - superbook-net
     healthcheck:
+      # /version エンドポイントでの互換性確認 [構築方針]
       test: ["CMD", "curl", "-f", "http://localhost:8000/version"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      # モデルロード時間を考慮（Torch 1.x + RealESRGAN で約60秒）
+      start_period: 120s
 
   # =============================================================
-  # 4. AI Service: OCR (YomiToku / Torch 2.x)
+  # 4. AI Service: OCR (YomiToku / Torch 2.x / CUDA 12.1)
   # =============================================================
   yomitoku-api:
     build:
@@ -108,11 +121,13 @@ services:
     networks:
       - superbook-net
     healthcheck:
+      # /version エンドポイントでの互換性確認 [構築方針]
       test: ["CMD", "curl", "-f", "http://localhost:8000/version"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      # モデルロード時間を考慮（Torch 2.x + YomiToku で約90秒）
+      start_period: 120s
 
 networks:
   superbook-net:

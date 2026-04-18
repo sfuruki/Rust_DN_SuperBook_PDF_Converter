@@ -5,11 +5,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip libgl1-mesa-glx libglib2.0-0 curl && \
+    python3 python3-pip libgl1-mesa-glx libglib2.0-0 curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
+# 高速インストーラー uv を導入 [前に解決した方針]
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+# 前に解決した方針: Torch を cu121 インデックスから先行インストール
+RUN uv pip install --system --no-cache \
+    torch>=2.0.0 torchvision>=0.15.0 \
+    --index-url https://download.pytorch.org/whl/cu121 && \
+    uv pip install --system --no-cache -r requirements.txt
 
 COPY . .
 
