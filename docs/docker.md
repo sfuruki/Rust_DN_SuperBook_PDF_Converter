@@ -133,7 +133,37 @@ docker/
 
 ---
 
+## Web UI のアップロード上限
+
+Web UI 経由の PDF アップロードは、以下 2 つの上限を両方満たす必要があります。
+
+1. フロント (Nginx) の `client_max_body_size`
+2. バックエンド (Axum) の request body / multipart 上限
+
+本リポジトリのデフォルトは **500MB** です。
+
+- Nginx: `web_ui/default.conf.template` の `client_max_body_size 500m;`
+- バックエンド: `superbook-pdf serve --upload-limit 500` (MB)
+
+`--upload-limit` を変更する場合は、Nginx 側の `client_max_body_size` も同等以上に合わせてください。
+
+---
+
 ## トラブルシューティング
+
+### 複数ページ PDF で Upload failed になる
+
+Web UI で複数ページ PDF が失敗する場合、まず HTTP ステータスを確認してください。
+
+- `413` の場合: Nginx の `client_max_body_size` が小さい
+- `400` の場合: バックエンドの multipart 読み取り制限やアップロード上限不一致の可能性
+
+設定変更後は、対象コンテナを再ビルド・再起動してください。
+
+```bash
+docker compose build frontend rust-core-stable
+docker compose up -d --force-recreate frontend rust-core-stable
+```
 
 ### GPU が認識されない
 
