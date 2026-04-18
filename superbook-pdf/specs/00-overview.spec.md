@@ -93,7 +93,7 @@ superbook-pdf は、スキャンされた書籍PDFを高品質なデジタル書
 | パイプラインモジュール | ✅ 完了 | 13ステップ完全実装 |
 | キャッシュ機能 | ✅ 完了 | sha256ベース |
 | Poppler対応 | ✅ 完了 | ImageMagickなしでも動作 |
-| Container/Podman | ✅ 完了 | Rust版Containerfile |
+| Container/Podman | ✅ 完了 | Rust版Dockerfile |
 | Web API (v0.4.0) | ✅ 完了 | REST API + WebUI |
 | WebSocket (v0.5.0) | ✅ 完了 | リアルタイム進捗更新 |
 | Batch API (v0.6.0) | ✅ 完了 | 複数PDF一括処理 |

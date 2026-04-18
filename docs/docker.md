@@ -72,7 +72,7 @@ podman run --rm --device nvidia.com/gpu=all \
 GPU なしの環境向けに `Dockerfile.cpu` を提供しています。
 
 ```
-superbook-pdf/docker/backend/Dockerfile.cpu
+docker/backend/Dockerfile.cpu
 ```
 
 特徴:
@@ -83,7 +83,7 @@ superbook-pdf/docker/backend/Dockerfile.cpu
 ### 手動ビルド
 
 ```bash
-docker build -f superbook-pdf/docker/backend/Dockerfile.cpu -t superbook-pdf:cpu superbook-pdf/
+docker build -f docker/backend/Dockerfile.cpu -t superbook-rust-core-cpu:latest superbook-pdf/
 ```
 
 ---
@@ -91,11 +91,13 @@ docker build -f superbook-pdf/docker/backend/Dockerfile.cpu -t superbook-pdf:cpu
 ## Dockerfile の構成
 
 ```
-superbook-pdf/docker/
+superbook-pdf/
+└── Dockerfile             # NVIDIA (デフォルト)
+
+docker/
 └── backend/
-    ├── Dockerfile         # NVIDIA GPU (デフォルト)
-    ├── Dockerfile.cpu     # CPU のみ
-    └── Dockerfile.rocm    # AMD GPU (ROCm)
+  ├── Dockerfile.cpu     # CPU のみ
+  └── Dockerfile.rocm    # AMD GPU (ROCm)
 ```
 
 ### マルチステージビルド

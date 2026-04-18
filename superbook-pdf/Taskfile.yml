@@ -48,7 +48,7 @@ tasks:
   container-build:
     desc: Build container image
     cmds:
-      - podman build -t {{.IMAGE_NAME}}:{{.IMAGE_TAG}} -f Containerfile .
+      - podman build -t {{.IMAGE_NAME}}:{{.IMAGE_TAG}} -f Dockerfile .
 
   container-run:
     desc: Run container (use INPUT_DIR and OUTPUT_DIR vars)
