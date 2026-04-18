@@ -108,7 +108,7 @@ superbook-pdf/
 │       ├── websocket.rs       # WebSocket ハンドラー
 │       ├── job.rs             # ジョブキュー
 │       ├── worker.rs          # バックグラウンドワーカー
-│       └── static/            # Web UI アセット
+│       └── ...                # API/WS 補助モジュール
 ├── tests/                     # 統合テスト
 ├── specs/                     # TDD 仕様
 └── docker/
@@ -179,7 +179,7 @@ Rust Core → HTTP API → AI Services (RealESRGAN / YomiToku)
 
 | Feature | 説明 |
 |---------|------|
-| `web` | Web UI (Axum + WebSocket) を有効化 |
+| `web` | Web API/WebSocket (Axum) を有効化 |
 
 ```bash
 # Web 機能付き

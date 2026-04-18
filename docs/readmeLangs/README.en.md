@@ -52,7 +52,7 @@ AI super-resolution with RealESRGAN sharpens text edges and dramatically improve
 - **Marker Removal** - Detect and remove highlighter marks
 - **Deblur** - Sharpen blurry images (Unsharp Mask / NAFNet / DeblurGAN-v2)
 - **Color Correction** - HSV bleed-through suppression, paper whitening
-- **Web UI** - Intuitive browser-based operation
+- **Web UI** - Browser interface served by Nginx
 
 ---
 
@@ -73,8 +73,8 @@ superbook-pdf convert input.pdf -o output/ --advanced --ocr
 # Markdown conversion
 superbook-pdf markdown input.pdf -o markdown_output/
 
-# Launch Web UI
-superbook-pdf serve --port 8080
+# Launch Web UI (recommended: Nginx + API)
+docker compose up -d
 ```
 
 ---
@@ -274,6 +274,10 @@ Open http://localhost:8080 in your browser.
 A browser-based interface where you can simply drag and drop files to start conversion. Real-time progress display via WebSocket.
 
 ```bash
+# Recommended: frontend (Nginx) + backend (Rust API/WS)
+docker compose up -d
+
+# Direct mode starts backend API/WS server only
 superbook-pdf serve --port 8080 --bind 0.0.0.0
 ```
 
