@@ -141,7 +141,10 @@ pub mod reprocess;
 pub mod util;
 pub mod vertical_detect;
 #[cfg(feature = "web")]
-pub mod web;
+#[path = "web/mod.rs"]
+pub mod api_server;
+#[cfg(feature = "web")]
+pub use api_server as web;
 pub mod yomitoku;
 
 // Issue #32-35: Cleanup and enhancement modules
@@ -238,7 +241,7 @@ pub use vertical_detect::{
 
 // Web server (optional feature)
 #[cfg(feature = "web")]
-pub use web::{
+pub use api_server::{
     extract_api_key, generate_preview_base64, graceful_shutdown, preview_stage,
     wait_for_shutdown_signal, ApiKey, AuthConfig, AuthError, AuthManager, AuthResult,
     AuthStatusResponse, BatchJob, BatchProgress, BatchQueue, BatchStatistics, BatchStatus,
