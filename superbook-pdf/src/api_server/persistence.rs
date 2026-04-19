@@ -510,7 +510,7 @@ impl RetryResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::web::job::ConvertOptions;
+    use crate::api_server::job::ConvertOptions;
     use tempfile::tempdir;
 
     // PERSIST-001: PersistenceConfig デフォルト値
@@ -781,7 +781,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("jobs.json");
         let store: Arc<dyn JobStore> = Arc::new(JsonJobStore::new(&path).unwrap());
-        let queue = crate::web::job::JobQueue::new();
+        let queue = crate::api_server::job::JobQueue::new();
 
         let manager = RecoveryManager::new(store.clone(), queue.clone());
 
@@ -793,7 +793,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("jobs.json");
         let store = Arc::new(JsonJobStore::new(&path).unwrap());
-        let queue = crate::web::job::JobQueue::new();
+        let queue = crate::api_server::job::JobQueue::new();
 
         // Add some pending jobs to the store
         let queued_job = Job::new("queued.pdf", ConvertOptions::default());
@@ -818,7 +818,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("jobs.json");
         let store = Arc::new(JsonJobStore::new(&path).unwrap());
-        let queue = crate::web::job::JobQueue::new();
+        let queue = crate::api_server::job::JobQueue::new();
 
         // Add a processing job
         let mut processing_job = Job::new("processing.pdf", ConvertOptions::default());
@@ -840,7 +840,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("jobs.json");
         let store = Arc::new(JsonJobStore::new(&path).unwrap());
-        let queue = crate::web::job::JobQueue::new();
+        let queue = crate::api_server::job::JobQueue::new();
 
         // Add a failed job
         let mut failed_job = Job::new("failed.pdf", ConvertOptions::default());
@@ -864,7 +864,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("jobs.json");
         let store: Arc<dyn JobStore> = Arc::new(JsonJobStore::new(&path).unwrap());
-        let queue = crate::web::job::JobQueue::new();
+        let queue = crate::api_server::job::JobQueue::new();
 
         let manager = RecoveryManager::new(store.clone(), queue.clone());
 

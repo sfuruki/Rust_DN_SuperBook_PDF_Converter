@@ -450,7 +450,7 @@ impl WorkerPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::web::job::Job;
+    use crate::api_server::job::Job;
 
     #[tokio::test]
     async fn test_worker_message_debug() {

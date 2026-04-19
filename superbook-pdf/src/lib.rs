@@ -141,10 +141,7 @@ pub mod reprocess;
 pub mod util;
 pub mod vertical_detect;
 #[cfg(feature = "web")]
-#[path = "web/mod.rs"]
 pub mod api_server;
-#[cfg(feature = "web")]
-pub use api_server as web;
 pub mod yomitoku;
 
 // Issue #32-35: Cleanup and enhancement modules

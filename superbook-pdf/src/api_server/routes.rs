@@ -1484,7 +1484,7 @@ mod tests {
     // TC-AUTH-002: AppState with custom auth config
     #[tokio::test]
     async fn test_app_state_with_auth_config() {
-        use crate::web::auth::ApiKey;
+        use crate::api_server::auth::ApiKey;
 
         let work_dir = std::env::temp_dir().join("superbook_test_auth_custom");
         let keys = vec![ApiKey::new("test-key", "Test")];
@@ -1499,7 +1499,7 @@ mod tests {
     // TC-AUTH-003: Auth status response serialization
     #[test]
     fn test_auth_status_response_serialize() {
-        use crate::web::auth::Scope;
+        use crate::api_server::auth::Scope;
         let response = AuthStatusResponse::authenticated(
             "my-key".to_string(),
             vec![Scope::Read, Scope::Write],
