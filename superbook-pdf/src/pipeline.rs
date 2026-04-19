@@ -534,14 +534,18 @@ impl PdfPipeline {
         std::fs::create_dir_all(&work_dir)?;
 
         // Step 1: Read PDF metadata
-        progress.on_step_start("Reading PDF...");
+        progress.on_step_start("Reading PDF metadata...");
         let reader = crate::LopdfReader::new(input)
             .map_err(|e| PipelineError::ExtractionFailed(e.to_string()))?;
         let total_pages = reader.info.page_count;
+        progress.on_debug(&format!("  {} pages detected", total_pages));
         progress.on_step_complete("Reading PDF", &format!("{} pages", total_pages));
 
         // Step 2: Extract images
-        progress.on_step_start(&format!("Extracting images (DPI: {})...", self.config.dpi));
+        progress.on_step_start(&format!(
+            "Extracting {} pages (DPI: {})...",
+            total_pages, self.config.dpi
+        ));
         let extract_options = crate::ExtractOptions::builder()
             .dpi(self.config.dpi)
             .build();
@@ -555,11 +559,12 @@ impl PdfPipeline {
         // Apply max_pages limit
         if let Some(max_pages) = self.config.max_pages {
             if extracted_pages.len() > max_pages {
-                progress.on_debug(&format!("Limiting to {} pages (--max-pages)", max_pages));
+                progress.on_debug(&format!("  Limiting to {} pages (--max-pages)", max_pages));
                 extracted_pages.truncate(max_pages);
             }
         }
         let page_count = extracted_pages.len();
+        progress.on_debug(&format!("  {} pages extracted successfully", page_count));
         progress.on_step_complete("Extracting images", &format!("{} pages", page_count));
 
         // Convert to PathBuf list

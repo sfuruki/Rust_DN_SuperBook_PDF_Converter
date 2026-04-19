@@ -277,6 +277,25 @@
             color: #555;
         }
 
+        .progress-info-left {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .progress-step-count {
+            font-size: 0.8rem;
+            color: #888;
+            background: #f0f0f0;
+            padding: 2px 7px;
+            border-radius: 10px;
+        }
+
+        .progress-elapsed {
+            font-size: 0.8rem;
+            color: #aaa;
+        }
+
         .progress-bar {
             height: 24px;
             background: #e0e0e0;
@@ -290,10 +309,47 @@
             transition: width 0.3s;
         }
 
+        @keyframes progressPulse {
+            0%   { opacity: 1; }
+            50%  { opacity: 0.6; }
+            100% { opacity: 1; }
+        }
+
+        .progress-fill.pulsing {
+            animation: progressPulse 1.5s ease-in-out infinite;
+        }
+
         .progress-step {
             text-align: center;
             margin-top: 8px;
             color: #666;
+        }
+
+        /* Log panel */
+        .progress-log {
+            margin-top: 12px;
+            max-height: 120px;
+            overflow-y: auto;
+            font-size: 0.78rem;
+            color: #666;
+            background: #fafafa;
+            border: 1px solid #e8e8e8;
+            border-radius: 6px;
+            padding: 6px 10px;
+        }
+
+        .progress-log-entry {
+            padding: 2px 0;
+            line-height: 1.5;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .progress-log-entry:last-child {
+            border-bottom: none;
+        }
+
+        .progress-log-entry.completed {
+            color: #4caf50;
         }
 
         /* Result */
@@ -454,12 +510,19 @@
         <!-- Progress Section -->
         <div class="card progress-section" id="progress-section">
             <div class="progress-info">
-                <span id="progress-percent">0%</span>
-                <span id="progress-step">準備中...</span>
+                <div class="progress-info-left">
+                    <span id="progress-percent">0%</span>
+                    <span class="progress-step-count" id="progress-step-count"></span>
+                </div>
+                <div style="display:flex;gap:12px;align-items:center;">
+                    <span id="progress-step">準備中...</span>
+                    <span class="progress-elapsed" id="progress-elapsed"></span>
+                </div>
             </div>
             <div class="progress-bar">
-                <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+                <div class="progress-fill pulsing" id="progress-fill" style="width: 0%"></div>
             </div>
+            <div class="progress-log" id="progress-log"></div>
         </div>
 
         <!-- Result Section -->
@@ -495,6 +558,9 @@
         const progressFill = document.getElementById('progress-fill');
         const progressPercent = document.getElementById('progress-percent');
         const progressStep = document.getElementById('progress-step');
+        const progressStepCount = document.getElementById('progress-step-count');
+        const progressElapsed = document.getElementById('progress-elapsed');
+        const progressLog = document.getElementById('progress-log');
         const resultSection = document.getElementById('result-section');
         const resultSuccess = document.getElementById('result-success');
         const resultError = document.getElementById('result-error');
@@ -505,6 +571,10 @@
         let currentFile = null;
         let currentJobId = null;
         let ws = null;
+        let elapsedTimer = null;
+        let elapsedStart = null;
+        let lastPercent = 0;
+        let pulseTimer = null;
 
         // DPI Slider
         const dpiSlider = document.getElementById('dpi-slider');
@@ -691,6 +761,16 @@
 
                 const data = await response.json();
                 currentJobId = data.job_id;
+                // Start elapsed timer
+                elapsedStart = Date.now();
+                elapsedTimer = setInterval(() => {
+                    const sec = Math.floor((Date.now() - elapsedStart) / 1000);
+                    const m = Math.floor(sec / 60);
+                    const s = sec % 60;
+                    progressElapsed.textContent = m > 0
+                        ? m + '分' + String(s).padStart(2, '0') + '秒'
+                        : s + '秒';
+                }, 1000);
                 connectWebSocket(currentJobId);
             } catch (error) {
                 showError(error.message);
@@ -730,12 +810,32 @@
 
         function handleWebSocketMessage(msg) {
             switch (msg.type) {
-                case 'progress':
+                case 'progress': {
                     const data = msg.data;
                     progressFill.style.width = data.percent + '%';
                     progressPercent.textContent = data.percent + '%';
                     progressStep.textContent = data.step_name;
+                    if (data.total_steps > 0) {
+                        progressStepCount.textContent = 'ステップ ' + data.current_step + '/' + data.total_steps;
+                    }
+                    // Remove pulsing once progress actually moves
+                    if (data.percent > lastPercent) {
+                        progressFill.classList.remove('pulsing');
+                        lastPercent = data.percent;
+                        clearTimeout(pulseTimer);
+                        pulseTimer = setTimeout(() => progressFill.classList.add('pulsing'), 3000);
+                    }
                     break;
+                }
+
+                case 'log': {
+                    const entry = document.createElement('div');
+                    entry.className = 'progress-log-entry' + (msg.data.message.startsWith('✓') ? ' completed' : '');
+                    entry.textContent = msg.data.message;
+                    progressLog.appendChild(entry);
+                    progressLog.scrollTop = progressLog.scrollHeight;
+                    break;
+                }
 
                 case 'status_change':
                     console.log('Status changed:', msg.data.old_status, '->', msg.data.new_status);
@@ -751,10 +851,11 @@
                     showError(msg.data.message);
                     break;
 
-                case 'page_preview':
+                case 'page_preview': {
                     const preview = msg.data;
                     addPreview(preview.page_number, preview.preview_base64, preview.stage);
                     break;
+                }
             }
         }
 
@@ -763,6 +864,11 @@
                 ws.close();
                 ws = null;
             }
+            if (elapsedTimer) {
+                clearInterval(elapsedTimer);
+                elapsedTimer = null;
+            }
+            clearTimeout(pulseTimer);
         }
 
         // Fallback polling if WebSocket connection fails
@@ -820,8 +926,13 @@
             uploadArea.classList.remove('has-file');
             convertBtn.disabled = true;
             progressFill.style.width = '0%';
+            progressFill.classList.add('pulsing');
             progressPercent.textContent = '0%';
             progressStep.textContent = '準備中...';
+            progressStepCount.textContent = '';
+            progressElapsed.textContent = '';
+            while (progressLog.firstChild) progressLog.removeChild(progressLog.firstChild);
+            lastPercent = 0;
         }
 
         function resetForm() {

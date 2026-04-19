@@ -73,6 +73,12 @@ pub enum WsMessage {
         /// Time until server shuts down (in seconds)
         countdown_secs: u64,
     },
+    /// Log message for detailed progress display
+    #[serde(rename = "log")]
+    Log {
+        job_id: Uuid,
+        message: String,
+    },
     /// Page preview for real-time visualization (Phase 4.1)
     #[serde(rename = "page_preview")]
     PagePreview {
@@ -225,6 +231,18 @@ impl WsBroadcaster {
         self.broadcast(
             job_id,
             WsMessage::Error {
+                job_id,
+                message: message.to_string(),
+            },
+        )
+        .await;
+    }
+
+    /// Broadcast log message for detailed progress display
+    pub async fn broadcast_log(&self, job_id: Uuid, message: &str) {
+        self.broadcast(
+            job_id,
+            WsMessage::Log {
                 job_id,
                 message: message.to_string(),
             },

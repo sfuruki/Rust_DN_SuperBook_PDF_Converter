@@ -96,6 +96,15 @@ impl WebProgressCallback {
                 .await;
         });
     }
+
+    fn broadcast_log(&self, message: &str) {
+        let broadcaster = self.broadcaster.clone();
+        let job_id = self.job_id;
+        let msg = message.to_string();
+        tokio::spawn(async move {
+            broadcaster.broadcast_log(job_id, &msg).await;
+        });
+    }
 }
 
 impl ProgressCallback for WebProgressCallback {
@@ -130,12 +139,17 @@ impl ProgressCallback for WebProgressCallback {
         self.publish_progress(progress);
     }
 
-    fn on_step_complete(&self, _step: &str, _message: &str) {
-        // Step completion is handled by on_step_start of next step
+    fn on_step_complete(&self, step: &str, message: &str) {
+        let log_msg = if message.is_empty() {
+            format!("✓ {}", step)
+        } else {
+            format!("✓ {} ({})", step, message)
+        };
+        self.broadcast_log(&log_msg);
     }
 
-    fn on_debug(&self, _message: &str) {
-        // Debug messages not shown in web UI
+    fn on_debug(&self, message: &str) {
+        self.broadcast_log(message);
     }
 }
 
