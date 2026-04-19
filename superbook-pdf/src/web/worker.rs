@@ -163,6 +163,36 @@ fn to_pipeline_config(options: &ConvertOptions) -> PipelineConfig {
     }
 }
 
+fn output_name_from_input_filename(input_filename: &str) -> String {
+    let stem = std::path::Path::new(input_filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("output");
+    format!("{}_converted.pdf", stem)
+}
+
+fn preferred_output_path(base_output_path: &std::path::Path, input_filename: &str, job_id: Uuid) -> PathBuf {
+    let output_dir = base_output_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let preferred = output_dir.join(output_name_from_input_filename(input_filename));
+    if preferred == base_output_path || !preferred.exists() {
+        return preferred;
+    }
+
+    let stem = std::path::Path::new(input_filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("output");
+    let job_id_str = job_id.to_string();
+    let short_id = &job_id_str[..8];
+    output_dir.join(format!("{}_{}_converted.pdf", stem, short_id))
+}
+
 /// Background worker for job processing
 pub struct JobWorker {
     queue: JobQueue,
@@ -207,6 +237,18 @@ impl JobWorker {
 
     /// Process a single job with actual pipeline
     pub async fn process_job(&self, job_id: Uuid, input_path: PathBuf, options: ConvertOptions) {
+        let input_filename = self
+            .queue
+            .get(job_id)
+            .map(|job| job.input_filename)
+            .unwrap_or_else(|| {
+                input_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("upload.pdf")
+                    .to_string()
+            });
+
         // Mark job as processing
         self.queue.update(job_id, |job| {
             job.start();
@@ -252,10 +294,29 @@ impl JobWorker {
         match result {
             Ok(pipeline_result) => {
                 // Pipeline succeeded
+                let final_output_path = {
+                    let preferred = preferred_output_path(
+                        &pipeline_result.output_path,
+                        &input_filename,
+                        job_id,
+                    );
+                    if preferred != pipeline_result.output_path {
+                        if let Err(e) = std::fs::rename(&pipeline_result.output_path, &preferred) {
+                            let error_msg = format!("Failed to finalize output filename: {}", e);
+                            self.queue.update(job_id, |job| {
+                                job.fail(error_msg.clone());
+                            });
+                            self.broadcaster.broadcast_error(job_id, &error_msg).await;
+                            return;
+                        }
+                    }
+                    preferred
+                };
+
                 let page_count = pipeline_result.page_count;
                 let elapsed = pipeline_result.elapsed_seconds;
                 self.queue.update(job_id, |job| {
-                    job.complete(pipeline_result.output_path);
+                    job.complete(final_output_path);
                 });
                 // Broadcast completion via WebSocket
                 self.broadcaster
@@ -271,6 +332,20 @@ impl JobWorker {
                 self.broadcaster.broadcast_error(job_id, &error_msg).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_output_name_from_input_filename() {
+        assert_eq!(
+            output_name_from_input_filename("sample-book.pdf"),
+            "sample-book_converted.pdf"
+        );
+        assert_eq!(output_name_from_input_filename("noext"), "noext_converted.pdf");
     }
 }
 
