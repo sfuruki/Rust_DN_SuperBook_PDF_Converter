@@ -715,17 +715,17 @@ impl LopdfExtractor {
         output_dir: &Path,
         options: &ExtractOptions,
     ) -> Result<Vec<ExtractedPage>> {
-        // Try ImageMagick first if available (better quality for complex PDFs)
-        if Self::magick_available() {
-            return MagickExtractor::extract_all(pdf_path, output_dir, options);
-        }
-
-        // Try pdftoppm (poppler-utils) as second option
+        // Prefer pdftoppm (poppler-utils): lightweight, no memory limits, best for scanned PDFs
         if Self::pdftoppm_available() {
             return PopplerExtractor::extract_all(pdf_path, output_dir, options);
         }
 
-        // Fall back to pure Rust extraction
+        // Fall back to ImageMagick if pdftoppm is unavailable
+        if Self::magick_available() {
+            return MagickExtractor::extract_all(pdf_path, output_dir, options);
+        }
+
+        // Last resort: pure Rust extraction
         Self::extract_all(pdf_path, output_dir, options)
     }
 }
