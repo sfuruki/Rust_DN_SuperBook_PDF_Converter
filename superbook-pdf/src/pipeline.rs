@@ -501,6 +501,23 @@ impl PdfPipeline {
         output_dir.join(format!(".work_{}", pdf_name))
     }
 
+    /// Get page count quickly using pdfinfo (poppler) without loading the full PDF via lopdf.
+    /// Falls back to 0 if pdfinfo is unavailable.
+    fn quick_page_count(pdf_path: &Path) -> usize {
+        if let Ok(out) = std::process::Command::new("pdfinfo").arg(pdf_path).output() {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    if let Some(rest) = line.strip_prefix("Pages:") {
+                        if let Ok(n) = rest.trim().parse() {
+                            return n;
+                        }
+                    }
+                }
+            }
+        }
+        0
+    }
+
     /// Process a single PDF file (silent mode)
     pub async fn process(
         &self,
@@ -533,11 +550,9 @@ impl PdfPipeline {
         let work_dir = self.get_work_dir(input, output_dir);
         std::fs::create_dir_all(&work_dir)?;
 
-        // Step 1: Read PDF metadata
+        // Step 1: Read PDF metadata (fast: use pdfinfo command, not lopdf)
         progress.on_step_start("Reading PDF metadata...");
-        let reader = crate::LopdfReader::new(input)
-            .map_err(|e| PipelineError::ExtractionFailed(e.to_string()))?;
-        let total_pages = reader.info.page_count;
+        let total_pages = Self::quick_page_count(input);
         progress.on_debug(&format!("  {} pages detected", total_pages));
         progress.on_step_complete("Reading PDF", &format!("{} pages", total_pages));
 
@@ -672,11 +687,33 @@ impl PdfPipeline {
         };
 
         // Step 13: Generate PDF
+        // Load PDF metadata lazily via spawn_blocking (avoids blocking async runtime)
         progress.on_step_start("Generating output PDF...");
+        let input_for_meta = input.to_path_buf();
+        let page_count_for_meta = page_count;
+        let pdf_document = tokio::task::spawn_blocking(move || {
+            crate::LopdfReader::new(&input_for_meta)
+                .map(|r| r.info)
+                .unwrap_or_else(|_| crate::PdfDocument {
+                    path: input_for_meta.clone(),
+                    page_count: page_count_for_meta,
+                    metadata: crate::PdfMetadata::default(),
+                    pages: vec![],
+                    is_encrypted: false,
+                })
+        })
+        .await
+        .unwrap_or_else(|_| crate::PdfDocument {
+            path: input.to_path_buf(),
+            page_count,
+            metadata: crate::PdfMetadata::default(),
+            pages: vec![],
+            is_encrypted: false,
+        });
         self.step_generate_pdf(
             &current_images,
             &output_path,
-            &reader.info,
+            &pdf_document,
             &ocr_results,
             page_number_shift,
             is_vertical,
