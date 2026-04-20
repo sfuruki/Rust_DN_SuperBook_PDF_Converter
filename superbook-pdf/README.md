@@ -2,16 +2,22 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Rust](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org/)
-[![CI](https://github.com/clearclown/Rust_DN_SuperBook_PDF_Converter/actions/workflows/ci.yml/badge.svg)](https://github.com/clearclown/Rust_DN_SuperBook_PDF_Converter/actions/workflows/ci.yml)
+[![CI](https://github.com/sfuruki/Rust_DN_SuperBook_Reforge/actions/workflows/ci.yml/badge.svg)](https://github.com/sfuruki/Rust_DN_SuperBook_Reforge/actions/workflows/ci.yml)
 
-> **Fork of [dnobori/DN_SuperBook_PDF_Converter](https://github.com/dnobori/DN_SuperBook_PDF_Converter)**
+> **Fork lineage:**
 >
-> [フォーク元の素晴らしき芸術的なREADME.md](https://github.com/dnobori/DN_SuperBook_PDF_Converter/blob/master/README.md) : 正直、これを読めばすべてがわかる
+> - [dnobori/DN_SuperBook_PDF_Converter](https://github.com/dnobori/DN_SuperBook_PDF_Converter) (Original)
+> - [clearclown/Rust_DN_SuperBook_PDF_Converter](https://github.com/clearclown/Rust_DN_SuperBook_PDF_Converter) (Rust fork)
 >
-> Rust で完全リライトしたスキャン書籍 PDF 高品質化ツール
+> Rust_DN_SuperBook_Reforge は、DN_SuperBook_PDF_Converter と Rust_DN_SuperBook_PDF_Converter の流れを引き継いだ派生プロジェクトです。
+>
+> 基本的な変換機能は踏襲しつつ、現在の利用環境に合わせて構成や運用面を整理し、機能追加や調整を行いやすい形にしています。
+>
+> CLI と Web API の両方で扱いやすいことを重視し、拡張しやすさを意識した構成にしています。
 
 **オリジナル著者:** 登 大遊 (Daiyuu Nobori) 様
-**Rust リライト:** clearclown
+**Rust リライト:** clearclown 様
+**派生・調整:** sfuruki
 **ライセンス:** AGPL v3.0
 
 ---

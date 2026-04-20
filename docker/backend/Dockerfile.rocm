@@ -17,7 +17,7 @@ COPY Cargo.toml Cargo.lock ./
 
 # Create dummy src to build dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
-    mkdir -p src/web && touch src/lib.rs
+    mkdir -p src/api_server && touch src/lib.rs
 RUN cargo build --release --features web 2>/dev/null || true
 RUN rm -rf src
 

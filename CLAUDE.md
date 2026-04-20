@@ -59,7 +59,7 @@ superbook-pdf/
 │   ├── color_stats.rs       # HSV color correction
 │   ├── realesrgan.rs        # AI upscaling (Python bridge)
 │   ├── yomitoku.rs          # Japanese OCR (Python bridge)
-│   └── web/                 # Web API (feature: web)
+│   └── api_server/          # Web API (feature: web)
 │       ├── mod.rs
 │       ├── server.rs        # Axum server
 │       ├── routes.rs        # REST endpoints
@@ -81,7 +81,7 @@ superbook-pdf/
 | `page_number/detect.rs` | 4-stage fallback page number detection |
 | `page_number/offset.rs` | calc_overlap_center algorithm |
 | `color_stats.rs` | HSV bleed-through suppression |
-| `web/websocket.rs` | Real-time progress, page previews |
+| `api_server/websocket.rs` | Real-time progress, page previews |
 
 ---
 
