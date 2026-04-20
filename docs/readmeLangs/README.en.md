@@ -28,7 +28,7 @@
 
 ## Before / After
 
-![Before and After comparison](../../doc_img/ba.png)
+![Before and After comparison](../doc_img/ba.png)
 
 | | Before (Left) | After (Right) |
 |---|---|---|
@@ -269,7 +269,7 @@ Open http://localhost:8080 in your browser.
 
 ## Web UI
 
-![Web UI](../../doc_img/webUI.png)
+![Web UI](../doc_img/webUI.png)
 
 A browser-based interface where you can simply drag and drop files to start conversion. Real-time progress display via WebSocket.
 

@@ -17,17 +17,17 @@ superbook-pdf は、スキャンされた書籍PDFを高品質なデジタル書
 │                    Processing Pipeline                          │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. PDF Reading      (pdf_reader.rs)                            │
-│  2. Image Extraction (image_extract.rs)                         │
-│  3. Deskew           (deskew.rs)                                │
-│  4. Margin Trim      (margin.rs)                                │
+│  2. Image Extraction (image_extract.rs) ← pdftoppm            │
+│  3. Margin Trim      (margin/)                                  │
+│  4. Shadow Removal   (margin/shadow.rs)                         │
 │  5. AI Upscaling     (realesrgan.rs) ← Python Bridge            │
-│  6. Normalize        (normalize.rs)        ← Phase 1            │
-│  7. Color Correction (color_stats.rs)      ← Phase 2            │
-│  8. Group Crop       (margin.rs)           ← Phase 3            │
-│  9. Page Offset      (page_number.rs)      ← Phase 4            │
-│ 10. Finalize         (finalize.rs)         ← Phase 5            │
-│ 11. OCR              (yomitoku.rs) ← Python Bridge              │
-│ 12. PDF Writing      (pdf_writer.rs)                            │
+│  6. Deblur           (cleanup/deblur.rs)                        │
+│  7. Rotation Detect  (vertical_detect.rs)                       │
+│  8. Deskew           (deskew/)                                  │
+│  9. Color Correction (color_stats.rs)                           │
+│ 10. Group Crop       (margin/)                                  │
+│ 11. PDF Writing      (pdf_writer.rs)                            │
+│ 12. OCR              (yomitoku.rs) ← Python Bridge              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -38,12 +38,12 @@ superbook-pdf は、スキャンされた書籍PDFを高品質なデジタル書
 | CLI | cli.rs | コマンドライン引数解析 |
 | PDF Reader | pdf_reader.rs | PDF読み込み、メタデータ抽出 |
 | PDF Writer | pdf_writer.rs | PDF生成、OCRレイヤー埋め込み |
-| Image Extract | image_extract.rs | PDF→画像抽出 (ImageMagick) |
-| Deskew | deskew.rs | 傾き検出・補正 |
-| Margin | margin.rs | マージン検出・トリミング・グループクロップ |
+| Image Extract | image_extract.rs | PDF→画像抽出 (pdftoppm / ImageMagick) |
+| Deskew | deskew/ | 偈き検出・補正 |
+| Margin | margin/ | マージン検出・トリミング・グループクロップ |
 | Normalize | normalize.rs | 内部解像度正規化 (4960x7016) |
 | Color Stats | color_stats.rs | 色統計・グローバルカラー補正 |
-| Page Number | page_number.rs | ページ番号検出・オフセット計算 |
+| Page Number | page_number/ | ページ番号検出・オフセット計算 |
 | Finalize | finalize.rs | 最終出力処理・リサイズ |
 | RealESRGAN | realesrgan.rs | AI画像鮮明化 (Python連携) |
 | YomiToku | yomitoku.rs | 日本語OCR (Python連携) |
@@ -61,7 +61,7 @@ superbook-pdf は、スキャンされた書籍PDFを高品質なデジタル書
 | `--ocr` | false | 日本語OCR有効化 |
 | `--upscale` | true | AI Upscaling有効化 |
 | `--deskew` | true | 傾き補正有効化 |
-| `--margin-trim` | 0.5 | マージントリム% |
+| `--margin-trim` | 0.7 | マージントリム% |
 | `--gpu` | true | GPU処理有効化 |
 | `--threads` | auto | 並列スレッド数 |
 

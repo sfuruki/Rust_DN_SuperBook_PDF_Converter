@@ -24,7 +24,7 @@
 
 ## Before / After
 
-![Before and After comparison](doc_img/ba.png)
+![Before and After comparison](../docs/doc_img/ba.png)
 
 | | Before (左) | After (右) |
 |---|---|---|

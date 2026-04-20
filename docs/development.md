@@ -79,8 +79,11 @@ superbook-pdf/
 │   │   ├── detect.rs          # マージン検出
 │   │   ├── content_aware.rs   # コンテンツ認識マージン
 │   │   ├── group.rs           # グループクロップ
-│   │   └── shadow.rs          # 影除去
+│   │   ├── shadow.rs          # 影除去
+│   │   └── types.rs           # 型定義
 │   ├── cleanup/
+│   │   ├── mod.rs
+│   │   ├── types.rs           # 型定義
 │   │   ├── deblur.rs          # ブレ補正
 │   │   └── marker_removal.rs  # マーカー除去
 │   ├── page_number/
@@ -101,14 +104,20 @@ superbook-pdf/
 │   ├── realesrgan.rs          # AI 超解像ブリッジ
 │   ├── yomitoku.rs            # OCR ブリッジ
 │   ├── util.rs                # ユーティリティ
-│   └── web/                   # Web API (feature: web)
+│   └── api_server/            # Web API (feature: web)
 │       ├── mod.rs
 │       ├── server.rs          # Axum サーバー
 │       ├── routes.rs          # REST エンドポイント
 │       ├── websocket.rs       # WebSocket ハンドラー
 │       ├── job.rs             # ジョブキュー
 │       ├── worker.rs          # バックグラウンドワーカー
-│       └── ...                # API/WS 補助モジュール
+│       ├── auth.rs            # 認証・APIキー
+│       ├── batch.rs           # バッチ処理
+│       ├── cors.rs            # CORS 設定
+│       ├── metrics.rs         # Prometheus メトリクス
+│       ├── persistence.rs     # ジョブ永続化
+│       ├── rate_limit.rs      # レート制限
+│       └── shutdown.rs        # グレースフルシャットダウン
 ├── tests/                     # 統合テスト
 ├── specs/                     # TDD 仕様
 └── Dockerfile                 # NVIDIA (デフォルト)

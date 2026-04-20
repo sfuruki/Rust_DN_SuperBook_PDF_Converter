@@ -36,7 +36,7 @@
 
 ## Before / After
 
-![Before and After comparison](doc_img/ba.png)
+![Before and After comparison](docs/doc_img/ba.png)
 
 | | Before (左) | After (右) |
 |---|---|---|
@@ -262,7 +262,7 @@ docker compose exec rust-core-stable sh -lc 'superbook-pdf convert /data/input/b
 
 ## Web UI
 
-![Web UI](doc_img/webUI.png)
+![Web UI](docs/doc_img/webUI.png)
 
 ブラウザベースのインターフェースで、ファイルをドラッグ&ドロップするだけで変換が始まります。WebSocket によるリアルタイム進捗表示に対応しています。
 
