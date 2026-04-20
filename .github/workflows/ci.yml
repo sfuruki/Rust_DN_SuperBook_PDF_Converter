@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -54,3 +61,22 @@ jobs:
 
       - name: Run tests
         run: cargo test --features web
+
+  docker-smoke:
+    name: Docker CPU Smoke Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build CPU rust-core image
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.cpu.yml build rust-core-stable
+
+      - name: Run rust-core help in container
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.cpu.yml run --rm --no-deps rust-core-stable --help
+
+      - name: Validate compose syntax
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.cpu.yml config > /tmp/compose.rendered.yml

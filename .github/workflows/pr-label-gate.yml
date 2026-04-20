@@ -1,0 +1,122 @@
+name: PR Label Gate
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, labeled, unlabeled, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-label-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label-gate:
+    name: Ensure release label exists
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ensure base labels and validate PR labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            const managedLabels = [
+              { name: 'breaking', color: 'B60205', description: 'Breaking changes' },
+              { name: 'feature', color: '0E8A16', description: 'New feature' },
+              { name: 'enhancement', color: '84B6EB', description: 'Enhancement' },
+              { name: 'bug', color: 'D73A4A', description: 'Bug fix' },
+              { name: 'fix', color: 'D73A4A', description: 'General fix' },
+              { name: 'perf', color: '5319E7', description: 'Performance improvement' },
+              { name: 'performance', color: '5319E7', description: 'Performance improvement' },
+              { name: 'docs', color: '0075CA', description: 'Documentation changes' },
+              { name: 'ci', color: '1D76DB', description: 'CI or automation changes' },
+              { name: 'dependencies', color: 'FBCA04', description: 'Dependency updates' },
+              { name: 'refactor', color: 'C2E0C6', description: 'Refactoring changes' },
+              { name: 'chore', color: 'CBD5E1', description: 'Maintenance chores' },
+              { name: 'skip-changelog', color: 'E4E669', description: 'Exclude from changelog' }
+            ];
+
+            for (const label of managedLabels) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: label.name });
+              } catch (error) {
+                if (error.status === 404) {
+                  await github.rest.issues.createLabel({ owner, repo, ...label });
+                } else {
+                  throw error;
+                }
+              }
+            }
+
+            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+              owner,
+              repo,
+              issue_number
+            });
+
+            const current = new Set(labels.map(l => l.name));
+            const allowed = new Set([
+              'breaking',
+              'feature',
+              'enhancement',
+              'bug',
+              'fix',
+              'perf',
+              'performance',
+              'docs',
+              'ci',
+              'dependencies',
+              'refactor',
+              'chore',
+              'skip-changelog'
+            ]);
+
+            const hasReleaseLabel = [...current].some(name => allowed.has(name));
+
+            const marker = '<!-- pr-label-gate-comment -->';
+            const body = `${marker}
+            PR にはリリース分類ラベルが1つ以上必要です。
+
+            例: feature / bug / perf / docs / ci / dependencies / refactor / breaking / chore
+            （変更をリリースノートから除外する場合は skip-changelog も利用可能）`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+
+            if (!hasReleaseLabel) {
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner,
+                  repo,
+                  comment_id: existing.id,
+                  body
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number,
+                  body
+                });
+              }
+              core.setFailed('No release classification label found on this PR.');
+            } else if (existing) {
+              await github.rest.issues.deleteComment({
+                owner,
+                repo,
+                comment_id: existing.id
+              });
+            }

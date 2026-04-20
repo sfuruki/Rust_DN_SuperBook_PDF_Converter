@@ -1,0 +1,39 @@
+name: Dependency Policy
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'superbook-pdf/Cargo.toml'
+      - 'superbook-pdf/Cargo.lock'
+      - 'superbook-pdf/deny.toml'
+      - '.github/workflows/dependency-policy.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'superbook-pdf/Cargo.toml'
+      - 'superbook-pdf/Cargo.lock'
+      - 'superbook-pdf/deny.toml'
+      - '.github/workflows/dependency-policy.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-policy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: superbook-pdf
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features advisories bans licenses sources

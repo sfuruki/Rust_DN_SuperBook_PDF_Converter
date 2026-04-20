@@ -1,0 +1,19 @@
+docs:
+  - changed-files:
+      - any-glob-to-any-file: ['README.md', 'docs/**', 'superbook-pdf/README.md']
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file: ['.github/workflows/**', '.github/release.yml', '.github/pull_request_template.md']
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file: ['superbook-pdf/Cargo.toml', 'superbook-pdf/Cargo.lock', 'ai_services/**/requirements.txt']
+
+docker:
+  - changed-files:
+      - any-glob-to-any-file: ['docker-compose*.yml', 'docker/**', 'superbook-pdf/Dockerfile', 'web_ui/Dockerfile', 'ai_services/**/Dockerfile']
+
+refactor:
+  - changed-files:
+      - any-glob-to-any-file: ['superbook-pdf/src/**']

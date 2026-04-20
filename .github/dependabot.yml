@@ -1,0 +1,35 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/superbook-pdf"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - ci
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - ci
+
+  - package-ecosystem: "pip"
+    directory: "/ai_services/realesrgan"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+
+  - package-ecosystem: "pip"
+    directory: "/ai_services/yomitoku"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies

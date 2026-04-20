@@ -1,0 +1,12 @@
+# Default owner
+* @sfuruki
+
+# Core Rust processing
+/superbook-pdf/src/ @sfuruki
+
+# CI/CD and release ops
+/.github/ @sfuruki
+
+# Docker and deployment
+/docker/ @sfuruki
+/docker-compose*.yml @sfuruki

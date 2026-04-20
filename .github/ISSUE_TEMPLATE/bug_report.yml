@@ -1,0 +1,96 @@
+name: Bug Report
+description: Report a reproducible problem for stable support environments.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Note: Depending on project priorities, workload, and reproducibility, we may not be able to address every report.
+
+        Thanks for reporting.
+        For stable support, this project currently targets:
+        - Windows 11 + WSL2 (Ubuntu)
+        - Docker Desktop + Docker Compose
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / Tag
+      description: e.g. v1.0.0, main commit hash
+      placeholder: v1.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: run_mode
+    attributes:
+      label: Run Mode
+      options:
+        - Docker Web UI
+        - Docker CLI
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem Summary
+      description: What happened and what you expected.
+      placeholder: A short summary of the issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction Steps
+      description: Provide exact commands and input conditions.
+      placeholder: |
+        1. docker compose up -d
+        2. docker compose exec rust-core-stable sh -lc 'superbook-pdf convert /data/input/book.pdf'
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Paste error output and key logs.
+      placeholder: Paste terminal logs here.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: env_info
+    attributes:
+      label: Environment Info
+      description: Paste outputs of diagnostics commands.
+      placeholder: |
+        superbook-pdf info
+        docker compose ps
+        docker compose logs --tail=200 rust-core-stable
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: gpu_mode
+    attributes:
+      label: GPU / CPU Mode
+      options:
+        - NVIDIA GPU mode (docker-compose.yml)
+        - CPU-only mode (docker-compose.cpu.yml)
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any extra details, attachments, or workarounds.
