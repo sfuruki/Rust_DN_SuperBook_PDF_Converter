@@ -1025,7 +1025,7 @@ mod tests {
         .unwrap();
 
         if let Commands::Convert(args) = cli.command {
-            assert_eq!(args.output, PathBuf::from("/custom/output"));
+            assert_eq!(args.output, Some(PathBuf::from("/custom/output")));
         } else {
             panic!("Expected Convert command");
         }
@@ -1037,8 +1037,8 @@ mod tests {
         let cli = Cli::try_parse_from(["superbook-pdf", "convert", "input.pdf"]).unwrap();
 
         if let Commands::Convert(args) = cli.command {
-            // Default output is "./output"
-            assert_eq!(args.output, PathBuf::from("./output"));
+            // Default output is automatic (None)
+            assert_eq!(args.output, None);
         } else {
             panic!("Expected Convert command");
         }
@@ -1294,7 +1294,11 @@ mod tests {
         ])
         .unwrap();
         if let Commands::Convert(args) = cli.command {
-            assert!(args.output.to_string_lossy().contains("directory"));
+            assert!(args
+                .output
+                .as_ref()
+                .map(|p| p.to_string_lossy().contains("directory"))
+                .unwrap_or(false));
         }
     }
 
@@ -1471,7 +1475,7 @@ mod tests {
             Cli::try_parse_from(["superbook-pdf", "convert", "input.pdf", "-o", "/custom/out"])
                 .unwrap();
         if let Commands::Convert(args) = cli.command {
-            assert_eq!(args.output, PathBuf::from("/custom/out"));
+            assert_eq!(args.output, Some(PathBuf::from("/custom/out")));
         }
     }
 
@@ -1994,7 +1998,13 @@ mod tests {
             let cli = Cli::try_parse_from(["superbook-pdf", "convert", "input.pdf", "-o", output])
                 .unwrap();
             if let Commands::Convert(args) = cli.command {
-                assert_eq!(args.output.to_string_lossy(), output);
+                assert_eq!(
+                    args.output
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .as_deref(),
+                    Some(output)
+                );
             }
         }
     }

@@ -379,8 +379,12 @@ impl MagickExtractor {
         // (especially macOS ImageMagick which requires -alpha after input file)
         let args = Self::build_magick_args(pdf_path, page_index, output_path, options);
 
-//        let mut cmd = Command::new("magick");
-        let cmd_name = if which::which("magick").is_ok() { "magick" } else { "convert" };
+        //        let mut cmd = Command::new("magick");
+        let cmd_name = if which::which("magick").is_ok() {
+            "magick"
+        } else {
+            "convert"
+        };
         let mut cmd = Command::new(cmd_name);
         cmd.args(&args);
 
@@ -470,18 +474,24 @@ impl MagickExtractor {
         }
 
         // Fallback: use ImageMagick identify
-//        let output = Command::new("magick")
-//            .args(["identify", "-format", "%n\n"])
-//            .arg(pdf_path)
-//            .output()?;
-        
+        //        let output = Command::new("magick")
+        //            .args(["identify", "-format", "%n\n"])
+        //            .arg(pdf_path)
+        //            .output()?;
+
         // magick があれば "magick identify"、なければ独立した "identify" コマンドを使う
         let output = if which::which("magick").is_ok() {
-            Command::new("magick").args(["identify", "-format", "%n\n"]).arg(pdf_path).output()?
+            Command::new("magick")
+                .args(["identify", "-format", "%n\n"])
+                .arg(pdf_path)
+                .output()?
         } else {
-            Command::new("identify").args(["-format", "%n\n"]).arg(pdf_path).output()?
+            Command::new("identify")
+                .args(["-format", "%n\n"])
+                .arg(pdf_path)
+                .output()?
         };
-        
+
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(line) = stdout.lines().next() {

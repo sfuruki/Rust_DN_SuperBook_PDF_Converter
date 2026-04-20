@@ -19,18 +19,18 @@
 //! 12. YomiToku OCR
 //! 13. PDF生成
 
-use rayon::prelude::*;
+use crate::ai_bridge::AiBridge;
+use crate::cli::ConvertArgs;
 use futures::stream::{self, StreamExt};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
-use crate::cli::ConvertArgs;
-use crate::ai_bridge::AiBridge;
 // 🚀 追加: upscale_batch メソッドを使用するためにトレイトをスコープに入れる
-//use crate::realesrgan::RealEsrganProcessor; 
+//use crate::realesrgan::RealEsrganProcessor;
 
 // ============================================================
 // Memory Management Utilities (Phase 3 optimization)
@@ -557,7 +557,8 @@ impl PdfPipeline {
         input: &Path,
         output_dir: &Path,
     ) -> Result<PipelineResult, PipelineError> {
-        self.process_with_progress(input, output_dir, &SilentProgress).await
+        self.process_with_progress(input, output_dir, &SilentProgress)
+            .await
     }
 
     /// Process a single PDF file with progress callback
@@ -648,7 +649,9 @@ impl PdfPipeline {
 
         // Step 3: AI Upscaling (if enabled)
         if self.config.upscale {
-            current_images = self.step_upscale(&work_dir, &current_images, progress).await?;
+            current_images = self
+                .step_upscale(&work_dir, &current_images, progress)
+                .await?;
         }
 
         // Step 3.5: Deblur (after upscale, before normalization)
@@ -1306,7 +1309,7 @@ impl PdfPipeline {
         let bridge_config = crate::AiBridgeConfig::default();
         let bridge: Arc<dyn AiBridge> = Arc::new(
             crate::ai_bridge::HttpApiBridge::new(bridge_config)
-                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?
+                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?,
         );
 
         let mut options = crate::realesrgan::RealEsrganOptions::builder().scale(2);
@@ -1332,37 +1335,38 @@ impl PdfPipeline {
         ));
 
         let completed = AtomicUsize::new(0);
-        let indexed_results: Vec<(usize, PathBuf)> = stream::iter(images.iter().cloned().enumerate())
-            .map(|(index, input_path)| {
-                let bridge = bridge.clone();
-                let options = options.clone();
-                let output_path = upscaled_dir.join(format!(
-                    "{}{}x.png",
-                    input_path.file_stem().unwrap_or_default().to_string_lossy(),
-                    options.scale
-                ));
-                async move {
-                    let esrgan = crate::RealEsrgan::new(bridge);
-                    let result = esrgan.upscale(&input_path, &output_path, &options).await;
-                    (index, input_path, result)
-                }
-            })
-            .buffer_unordered(max_parallel)
-            .map(|(index, input_path, upscale_result)| {
-                let output_path = match upscale_result {
-                    Ok(result) => result.output_path,
-                    Err(e) => {
-                        progress.on_warning(&format!("超解像失敗: {}", e));
-                        input_path.clone()
+        let indexed_results: Vec<(usize, PathBuf)> =
+            stream::iter(images.iter().cloned().enumerate())
+                .map(|(index, input_path)| {
+                    let bridge = bridge.clone();
+                    let options = options.clone();
+                    let output_path = upscaled_dir.join(format!(
+                        "{}{}x.png",
+                        input_path.file_stem().unwrap_or_default().to_string_lossy(),
+                        options.scale
+                    ));
+                    async move {
+                        let esrgan = crate::RealEsrgan::new(bridge);
+                        let result = esrgan.upscale(&input_path, &output_path, &options).await;
+                        (index, input_path, result)
                     }
-                };
+                })
+                .buffer_unordered(max_parallel)
+                .map(|(index, input_path, upscale_result)| {
+                    let output_path = match upscale_result {
+                        Ok(result) => result.output_path,
+                        Err(e) => {
+                            progress.on_warning(&format!("超解像失敗: {}", e));
+                            input_path.clone()
+                        }
+                    };
 
-                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                progress.on_step_progress(done, total_pages.max(1));
-                (index, output_path)
-            })
-            .collect()
-            .await;
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    progress.on_step_progress(done, total_pages.max(1));
+                    (index, output_path)
+                })
+                .collect()
+                .await;
 
         let mut indexed_results = indexed_results;
         indexed_results.sort_by_key(|(index, _)| *index);
@@ -1372,7 +1376,9 @@ impl PdfPipeline {
             .collect();
 
         // Cleanup RealESRGAN cache and free GPU memory after upscaling
-        let _ = bridge.call_cleanup(crate::ai_bridge::AiTool::RealESRGAN).await;
+        let _ = bridge
+            .call_cleanup(crate::ai_bridge::AiTool::RealESRGAN)
+            .await;
 
         progress.on_step_complete("超解像", &format!("{}画像", output_paths.len()));
         Ok(output_paths)
@@ -1714,7 +1720,7 @@ impl PdfPipeline {
         let bridge_config = crate::AiBridgeConfig::default();
         let bridge: Arc<dyn AiBridge> = Arc::new(
             crate::ai_bridge::HttpApiBridge::new(bridge_config)
-                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?
+                .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?,
         );
 
         let yomitoku = crate::YomiToku::new(bridge.clone());
@@ -1731,13 +1737,15 @@ impl PdfPipeline {
                 Err(e) => {
                     progress.on_debug(&format!("OCR失敗 ({}): {}", img_path.display(), e));
                     results.push(None)
-                },
+                }
             }
         }
         let success_count = results.iter().filter(|r| r.is_some()).count();
 
         // Cleanup YomiToku cache and free GPU memory after OCR
-        let _ = bridge.call_cleanup(crate::ai_bridge::AiTool::YomiToku).await;
+        let _ = bridge
+            .call_cleanup(crate::ai_bridge::AiTool::YomiToku)
+            .await;
 
         progress.on_step_complete("OCR", &format!("{}/{} pages", success_count, results.len()));
         Ok(results)
@@ -1779,17 +1787,16 @@ impl PdfPipeline {
                         blocks: r
                             .text_blocks
                             .iter()
-//                            .map(|b| TextBlock {
-//                                x: b.bbox.0 as f64,
-//                                y: b.bbox.1 as f64,
-//                                width: (b.bbox.2 - b.bbox.0) as f64,
-//                                height: (b.bbox.3 - b.bbox.1) as f64,
-//                                text: b.text.clone(),
-//                                font_size: b.font_size.unwrap_or(12.0) as f64,
-//                                vertical: matches!(b.direction, crate::TextDirection::Vertical),
-//                            })
-
-                        .map(|b| {
+                            //                            .map(|b| TextBlock {
+                            //                                x: b.bbox.0 as f64,
+                            //                                y: b.bbox.1 as f64,
+                            //                                width: (b.bbox.2 - b.bbox.0) as f64,
+                            //                                height: (b.bbox.3 - b.bbox.1) as f64,
+                            //                                text: b.text.clone(),
+                            //                                font_size: b.font_size.unwrap_or(12.0) as f64,
+                            //                                vertical: matches!(b.direction, crate::TextDirection::Vertical),
+                            //                            })
+                            .map(|b| {
                                 // 最終的な画像のピクセル高さ (Step 10で確定した値)
                                 let output_h = self.config.output_height as f64;
                                 // PDF(A4)の論理的な高さ (1/72インチ単位のポイント)
@@ -1799,16 +1806,16 @@ impl PdfPipeline {
                                 let scale = a4_height_pt / output_h;
 
                                 TextBlock {
-                                        x: b.bbox.0 as f64 * scale,
-                                        y: b.bbox.1 as f64 * scale,
-                                        width: b.bbox.2 as f64 * scale,  // すでに幅なので引き算不要 [1]
-                                        height: b.bbox.3 as f64 * scale, // すでに高さなので引き算不要 [1]
-                                        text: b.text.clone(),
-                                        // 重要: フォントサイズにもスケールを適用する
-                                        font_size: b.font_size.unwrap_or(12.0) as f64 * scale,
-                                        vertical: matches!(b.direction, crate::TextDirection::Vertical),
+                                    x: b.bbox.0 as f64 * scale,
+                                    y: b.bbox.1 as f64 * scale,
+                                    width: b.bbox.2 as f64 * scale, // すでに幅なので引き算不要 [1]
+                                    height: b.bbox.3 as f64 * scale, // すでに高さなので引き算不要 [1]
+                                    text: b.text.clone(),
+                                    // 重要: フォントサイズにもスケールを適用する
+                                    font_size: b.font_size.unwrap_or(12.0) as f64 * scale,
+                                    vertical: matches!(b.direction, crate::TextDirection::Vertical),
                                 }
-                        })
+                            })
                             .collect(),
                     })
                 })
@@ -2039,7 +2046,9 @@ mod tests {
         let config = PipelineConfig::default();
         let pipeline = PdfPipeline::new(config);
 
-        let result = pipeline.process(Path::new("/nonexistent/file.pdf"), Path::new("/output")).await;
+        let result = pipeline
+            .process(Path::new("/nonexistent/file.pdf"), Path::new("/output"))
+            .await;
 
         assert!(matches!(result, Err(PipelineError::InputNotFound(_))));
     }

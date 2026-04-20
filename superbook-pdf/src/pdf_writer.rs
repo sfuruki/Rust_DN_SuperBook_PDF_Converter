@@ -426,14 +426,8 @@ impl PrintPdfWriter {
 
         // Add first image to first page
         Self::add_image_to_layer(
-            &doc,
-            page1,
-            layer1,
-            &first_img,
-            &images[0],
-            width_mm,
-            height_mm,
-//            options.jpeg_quality,
+            &doc, page1, layer1, &first_img, &images[0], width_mm, height_mm,
+            //            options.jpeg_quality,
             options, // ← ここを「options」に変更
         )?;
 
@@ -472,14 +466,8 @@ impl PrintPdfWriter {
             let (page, layer) = doc.add_page(printpdf::Mm(w_mm), printpdf::Mm(h_mm), "Layer 1");
 
             Self::add_image_to_layer(
-                &doc,
-                page,
-                layer,
-                &img,
-                img_path,
-                w_mm,
-                h_mm,
-//                options.jpeg_quality,
+                &doc, page, layer, &img, img_path, w_mm, h_mm,
+                //                options.jpeg_quality,
                 options, // ← ここを「options」に変更
             )?;
 
@@ -521,7 +509,7 @@ impl PrintPdfWriter {
         width_mm: f32,
         height_mm: f32,
         options: &PdfWriterOptions, // オプション構造体を参照で受け取る
-//        jpeg_quality: u8,
+                                    //        jpeg_quality: u8,
     ) -> Result<()> {
         use printpdf::{Image, ImageTransform, Mm, Px};
 
@@ -545,10 +533,13 @@ impl PrintPdfWriter {
             let rgb_img = img.to_rgb8();
             let mut jpeg_buf = Vec::new();
             let mut cursor = std::io::Cursor::new(&mut jpeg_buf);
-//            let mut encoder =
-//                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, jpeg_quality);
-           // 以前の修正で options.dpi を使うようにしたため、ここも options 経由にする
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, options.jpeg_quality);
+            //            let mut encoder =
+            //                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, jpeg_quality);
+            // 以前の修正で options.dpi を使うようにしたため、ここも options 経由にする
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut cursor,
+                options.jpeg_quality,
+            );
             encoder
                 .encode(
                     rgb_img.as_raw(),
@@ -581,8 +572,8 @@ impl PrintPdfWriter {
         let layer_ref = doc.get_page(page).get_layer(layer);
 
         // Calculate transform to fit image to page
-//        let dpi = 300.0_f32;
-        let dpi = options.dpi as f32; 
+        //        let dpi = 300.0_f32;
+        let dpi = options.dpi as f32;
         let img_width_pt = img_width as f32 * 72.0 / dpi;
         let img_height_pt = img_height as f32 * 72.0 / dpi;
 

@@ -26,14 +26,14 @@
 //! let _available = futures::executor::block_on(bridge.check_tool(AiTool::RealESRGAN));
 //! ```
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
 //use std::sync::Arc;
-use thiserror::Error;
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use async_trait::async_trait;
+use thiserror::Error;
 use tokio;
 
 // ============================================================
@@ -322,12 +322,15 @@ impl std::fmt::Display for AiTool {
 
 /// AI Bridge trait
 #[async_trait]
-pub trait AiBridge: Send + Sync { // 🚀 Send + Sync を追加してスレッド間共有を可能に
+pub trait AiBridge: Send + Sync {
+    // 🚀 Send + Sync を追加してスレッド間共有を可能に
     /// Initialize bridge
-    fn new(config: AiBridgeConfig) -> Result<Self> where Self: Sized;
-    
+    fn new(config: AiBridgeConfig) -> Result<Self>
+    where
+        Self: Sized;
+
     /// Get the bridge configuration (🚀 yomitoku.rs 等からの参照に必須)
-    fn config(&self) -> &AiBridgeConfig; 
+    fn config(&self) -> &AiBridgeConfig;
 
     /// Check if tool is available (非同期化)
     async fn check_tool(&self, tool: AiTool) -> Result<bool>;
@@ -364,12 +367,15 @@ impl AiBridge for HttpApiBridge {
     }
 
     async fn check_tool(&self, tool: AiTool) -> Result<bool> {
-        let url = self.service_urls.get(&tool)
+        let url = self
+            .service_urls
+            .get(&tool)
             .ok_or_else(|| AiBridgeError::ProcessFailed("Service URL not configured".into()))?;
-        
+
         // ハンドシェイク: 最大3回までリトライ [構築方針]
         for attempt in 1..=3 {
-            match self.client
+            match self
+                .client
                 .get(format!("{}/version", url))
                 .timeout(Duration::from_secs(5))
                 .send()
@@ -452,11 +458,7 @@ impl AiBridge for HttpApiBridge {
                     return Ok(false);
                 }
                 Ok(resp) => {
-                    eprintln!(
-                        "❌ {} API returned error: {}",
-                        tool,
-                        resp.status()
-                    );
+                    eprintln!("❌ {} API returned error: {}", tool, resp.status());
                     return Ok(false);
                 }
             }
@@ -467,7 +469,10 @@ impl AiBridge for HttpApiBridge {
 
     async fn check_gpu(&self) -> Result<GpuStats> {
         // モック実装。本来は各サービスから情報を取得する [4]
-        Ok(GpuStats { peak_vram_mb: 0, avg_utilization: 0.0 })
+        Ok(GpuStats {
+            peak_vram_mb: 0,
+            avg_utilization: 0.0,
+        })
     }
 
     async fn execute(
@@ -478,18 +483,23 @@ impl AiBridge for HttpApiBridge {
         tool_options: &(dyn std::any::Any + Send + Sync),
     ) -> Result<AiTaskResult> {
         let start_time = Instant::now();
-        let url = self.service_urls.get(&tool)
+        let url = self
+            .service_urls
+            .get(&tool)
             .ok_or_else(|| AiBridgeError::ProcessFailed("Service URL not configured".into()))?;
         std::fs::create_dir_all(output_dir)?;
-        
+
         let mut processed = Vec::new();
         let mut failed = Vec::new();
 
         for input_file in input_files {
             match tool {
                 AiTool::RealESRGAN => {
-                    let opts = tool_options.downcast_ref::<crate::realesrgan::RealEsrganOptions>()
-                        .ok_or_else(|| AiBridgeError::ProcessFailed("Invalid options for RealESRGAN".into()))?;
+                    let opts = tool_options
+                        .downcast_ref::<crate::realesrgan::RealEsrganOptions>()
+                        .ok_or_else(|| {
+                            AiBridgeError::ProcessFailed("Invalid options for RealESRGAN".into())
+                        })?;
 
                     let output_path = output_dir.join(format!(
                         "{}{}x.png",
@@ -510,7 +520,9 @@ impl AiBridge for HttpApiBridge {
                     // リトライロジック付きでアップスケール実行
                     let mut last_error = String::new();
                     for attempt in 1..=self.config.retry_config.max_retries {
-                        match self.client.post(format!("{}/upscale", url))
+                        match self
+                            .client
+                            .post(format!("{}/upscale", url))
                             .json(&payload)
                             .send()
                             .await
@@ -522,39 +534,54 @@ impl AiBridge for HttpApiBridge {
                             Ok(resp) => {
                                 last_error = format!("HTTP error: {}", resp.status());
                                 if attempt < self.config.retry_config.max_retries {
-                                    let backoff_secs = if self.config.retry_config.exponential_backoff {
-                                        2u64.pow(attempt - 1)
-                                    } else {
-                                        self.config.retry_config.retry_interval.as_secs()
-                                    };
-                                    eprintln!("⚠️  Upscale attempt {}/{} failed ({}). Retrying in {}s...",
-                                        attempt, self.config.retry_config.max_retries, last_error, backoff_secs);
+                                    let backoff_secs =
+                                        if self.config.retry_config.exponential_backoff {
+                                            2u64.pow(attempt - 1)
+                                        } else {
+                                            self.config.retry_config.retry_interval.as_secs()
+                                        };
+                                    eprintln!(
+                                        "⚠️  Upscale attempt {}/{} failed ({}). Retrying in {}s...",
+                                        attempt,
+                                        self.config.retry_config.max_retries,
+                                        last_error,
+                                        backoff_secs
+                                    );
                                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                                 }
                             }
                             Err(e) => {
                                 last_error = e.to_string();
                                 if attempt < self.config.retry_config.max_retries {
-                                    let backoff_secs = if self.config.retry_config.exponential_backoff {
-                                        2u64.pow(attempt - 1)
-                                    } else {
-                                        self.config.retry_config.retry_interval.as_secs()
-                                    };
-                                    eprintln!("⚠️  Upscale attempt {}/{} failed ({}). Retrying in {}s...",
-                                        attempt, self.config.retry_config.max_retries, last_error, backoff_secs);
+                                    let backoff_secs =
+                                        if self.config.retry_config.exponential_backoff {
+                                            2u64.pow(attempt - 1)
+                                        } else {
+                                            self.config.retry_config.retry_interval.as_secs()
+                                        };
+                                    eprintln!(
+                                        "⚠️  Upscale attempt {}/{} failed ({}). Retrying in {}s...",
+                                        attempt,
+                                        self.config.retry_config.max_retries,
+                                        last_error,
+                                        backoff_secs
+                                    );
                                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                                 }
                             }
                         }
                     }
-                    
+
                     if !processed.contains(&output_path) {
                         failed.push((input_file.clone(), last_error));
                     }
                 }
                 AiTool::YomiToku => {
-                    let opts = tool_options.downcast_ref::<crate::yomitoku::YomiTokuOptions>()
-                        .ok_or_else(|| AiBridgeError::ProcessFailed("Invalid options for YomiToku".into()))?;
+                    let opts = tool_options
+                        .downcast_ref::<crate::yomitoku::YomiTokuOptions>()
+                        .ok_or_else(|| {
+                            AiBridgeError::ProcessFailed("Invalid options for YomiToku".into())
+                        })?;
 
                     let payload = OcrRequest {
                         input_path: input_file.to_string_lossy().to_string(),
@@ -574,67 +601,90 @@ impl AiBridge for HttpApiBridge {
                     // リトライロジック付きで OCR 実行
                     let mut last_error = String::new();
                     for attempt in 1..=self.config.retry_config.max_retries {
-                        match self.client.post(format!("{}/ocr", url))
+                        match self
+                            .client
+                            .post(format!("{}/ocr", url))
                             .json(&payload)
                             .send()
                             .await
                         {
-                            Ok(resp) if resp.status().is_success() => {
-                                match resp.text().await {
-                                    Ok(body) => {
-                                        if let Err(e) = std::fs::write(&output_json_path, body) {
-                                            last_error = format!("Failed to write OCR output: {}", e);
-                                            if attempt < self.config.retry_config.max_retries {
-                                                let backoff_secs = if self.config.retry_config.exponential_backoff {
-                                                    2u64.pow(attempt - 1)
-                                                } else {
-                                                    self.config.retry_config.retry_interval.as_secs()
-                                                };
-                                                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                                            }
-                                        } else {
-                                            processed.push(output_json_path.clone());
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        last_error = format!("Failed to read OCR response body: {}", e);
+                            Ok(resp) if resp.status().is_success() => match resp.text().await {
+                                Ok(body) => {
+                                    if let Err(e) = std::fs::write(&output_json_path, body) {
+                                        last_error = format!("Failed to write OCR output: {}", e);
                                         if attempt < self.config.retry_config.max_retries {
-                                            let backoff_secs = if self.config.retry_config.exponential_backoff {
+                                            let backoff_secs = if self
+                                                .config
+                                                .retry_config
+                                                .exponential_backoff
+                                            {
                                                 2u64.pow(attempt - 1)
                                             } else {
                                                 self.config.retry_config.retry_interval.as_secs()
                                             };
-                                            eprintln!("⚠️  OCR attempt {}/{} failed ({}). Retrying in {}s...",
-                                                attempt, self.config.retry_config.max_retries, last_error, backoff_secs);
-                                            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                                            tokio::time::sleep(Duration::from_secs(backoff_secs))
+                                                .await;
                                         }
+                                    } else {
+                                        processed.push(output_json_path.clone());
+                                        break;
                                     }
                                 }
-                            }
+                                Err(e) => {
+                                    last_error = format!("Failed to read OCR response body: {}", e);
+                                    if attempt < self.config.retry_config.max_retries {
+                                        let backoff_secs =
+                                            if self.config.retry_config.exponential_backoff {
+                                                2u64.pow(attempt - 1)
+                                            } else {
+                                                self.config.retry_config.retry_interval.as_secs()
+                                            };
+                                        eprintln!(
+                                            "⚠️  OCR attempt {}/{} failed ({}). Retrying in {}s...",
+                                            attempt,
+                                            self.config.retry_config.max_retries,
+                                            last_error,
+                                            backoff_secs
+                                        );
+                                        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                                    }
+                                }
+                            },
                             Ok(resp) => {
                                 last_error = format!("HTTP error: {}", resp.status());
                                 if attempt < self.config.retry_config.max_retries {
-                                    let backoff_secs = if self.config.retry_config.exponential_backoff {
-                                        2u64.pow(attempt - 1)
-                                    } else {
-                                        self.config.retry_config.retry_interval.as_secs()
-                                    };
-                                    eprintln!("⚠️  OCR attempt {}/{} failed ({}). Retrying in {}s...",
-                                        attempt, self.config.retry_config.max_retries, last_error, backoff_secs);
+                                    let backoff_secs =
+                                        if self.config.retry_config.exponential_backoff {
+                                            2u64.pow(attempt - 1)
+                                        } else {
+                                            self.config.retry_config.retry_interval.as_secs()
+                                        };
+                                    eprintln!(
+                                        "⚠️  OCR attempt {}/{} failed ({}). Retrying in {}s...",
+                                        attempt,
+                                        self.config.retry_config.max_retries,
+                                        last_error,
+                                        backoff_secs
+                                    );
                                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                                 }
                             }
                             Err(e) => {
                                 last_error = e.to_string();
                                 if attempt < self.config.retry_config.max_retries {
-                                    let backoff_secs = if self.config.retry_config.exponential_backoff {
-                                        2u64.pow(attempt - 1)
-                                    } else {
-                                        self.config.retry_config.retry_interval.as_secs()
-                                    };
-                                    eprintln!("⚠️  OCR attempt {}/{} failed ({}). Retrying in {}s...",
-                                        attempt, self.config.retry_config.max_retries, last_error, backoff_secs);
+                                    let backoff_secs =
+                                        if self.config.retry_config.exponential_backoff {
+                                            2u64.pow(attempt - 1)
+                                        } else {
+                                            self.config.retry_config.retry_interval.as_secs()
+                                        };
+                                    eprintln!(
+                                        "⚠️  OCR attempt {}/{} failed ({}). Retrying in {}s...",
+                                        attempt,
+                                        self.config.retry_config.max_retries,
+                                        last_error,
+                                        backoff_secs
+                                    );
                                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                                 }
                             }
@@ -697,25 +747,26 @@ impl HttpApiBridge {
     /// 🚀 Error E0107 対策: 戻り値を Result<Self> に修正
     pub fn new(config: AiBridgeConfig) -> Result<Self> {
         let mut service_urls = HashMap::new();
-        
+
         // docker-compose.yml 等の環境変数からURLを取得
         service_urls.insert(
-            AiTool::RealESRGAN, 
-            std::env::var("REALESRGAN_API_URL").unwrap_or_else(|_| "http://realesrgan-api:8000".into())
+            AiTool::RealESRGAN,
+            std::env::var("REALESRGAN_API_URL")
+                .unwrap_or_else(|_| "http://realesrgan-api:8000".into()),
         );
         service_urls.insert(
-            AiTool::YomiToku, 
-            std::env::var("YOMITOKU_API_URL").unwrap_or_else(|_| "http://yomitoku-api:8000".into())
+            AiTool::YomiToku,
+            std::env::var("YOMITOKU_API_URL").unwrap_or_else(|_| "http://yomitoku-api:8000".into()),
         );
 
         Ok(Self {
             config,
             client: Client::builder()
                 // 接続プール設定：156ページテストで安定動作させるため
-                .pool_max_idle_per_host(16)     // ホストあたりのアイドル接続数を増加
+                .pool_max_idle_per_host(16) // ホストあたりのアイドル接続数を増加
                 // 個別タイムアウト設定
-                .connect_timeout(Duration::from_secs(15))  // 接続確立: 15秒
-                .timeout(Duration::from_secs(900))         // 全体: 15分（N=5並行 × ~120s + 余裕）
+                .connect_timeout(Duration::from_secs(15)) // 接続確立: 15秒
+                .timeout(Duration::from_secs(900)) // 全体: 15分（N=5並行 × ~120s + 余裕）
                 .build()
                 .map_err(|e| AiBridgeError::ProcessFailed(e.to_string()))?,
             service_urls,
@@ -724,10 +775,14 @@ impl HttpApiBridge {
 
     /// Call cleanup endpoint to free GPU memory after processing
     pub async fn call_cleanup(&self, tool: AiTool) -> Result<()> {
-        let url = self.service_urls.get(&tool)
+        let url = self
+            .service_urls
+            .get(&tool)
             .ok_or_else(|| AiBridgeError::ProcessFailed("Service URL not configured".into()))?;
-        
-        match self.client.post(format!("{}/cleanup", url))
+
+        match self
+            .client
+            .post(format!("{}/cleanup", url))
             .timeout(Duration::from_secs(5))
             .send()
             .await

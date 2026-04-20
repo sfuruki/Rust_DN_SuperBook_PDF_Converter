@@ -36,7 +36,6 @@ pub struct AppState {
     pub batch_queue: BatchQueue,
     pub version: String,
     pub worker_pool: WorkerPool,
-    pub output_dir: PathBuf,
     pub broadcaster: Arc<WsBroadcaster>,
     pub metrics: Arc<MetricsCollector>,
     pub rate_limiter: Arc<RateLimiter>,
@@ -133,7 +132,6 @@ impl AppState {
             batch_queue,
             version: env!("CARGO_PKG_VERSION").to_string(),
             worker_pool,
-            output_dir,
             broadcaster,
             metrics,
             rate_limiter,
@@ -272,38 +270,32 @@ async fn fetch_ai_version(base_url: &str) -> AiServiceVersion {
         }
     };
 
-    match client
-        .get(format!("{}/version", base_url))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<serde_json::Value>().await {
-                Ok(v) => AiServiceVersion {
-                    available: true,
-                    service_version: v
-                        .get("service_version")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string()),
-                    torch_version: v
-                        .get("torch_version")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string()),
-                    cuda_available: v.get("cuda_available").and_then(|s| s.as_bool()),
-                    device: v
-                        .get("device")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string()),
-                },
-                Err(_) => AiServiceVersion {
-                    available: true,
-                    service_version: None,
-                    torch_version: None,
-                    cuda_available: None,
-                    device: None,
-                },
-            }
-        }
+    match client.get(format!("{}/version", base_url)).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(v) => AiServiceVersion {
+                available: true,
+                service_version: v
+                    .get("service_version")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
+                torch_version: v
+                    .get("torch_version")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
+                cuda_available: v.get("cuda_available").and_then(|s| s.as_bool()),
+                device: v
+                    .get("device")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
+            },
+            Err(_) => AiServiceVersion {
+                available: true,
+                service_version: None,
+                torch_version: None,
+                cuda_available: None,
+                device: None,
+            },
+        },
         _ => AiServiceVersion {
             available: false,
             service_version: None,
@@ -316,13 +308,15 @@ async fn fetch_ai_version(base_url: &str) -> AiServiceVersion {
 
 /// Health check endpoint
 async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let realesrgan_url = std::env::var("REALESRGAN_API_URL")
-        .unwrap_or_else(|_| "http://realesrgan-api:8000".into());
-    let yomitoku_url = std::env::var("YOMITOKU_API_URL")
-        .unwrap_or_else(|_| "http://yomitoku-api:8000".into());
+    let realesrgan_url =
+        std::env::var("REALESRGAN_API_URL").unwrap_or_else(|_| "http://realesrgan-api:8000".into());
+    let yomitoku_url =
+        std::env::var("YOMITOKU_API_URL").unwrap_or_else(|_| "http://yomitoku-api:8000".into());
 
-    let (realesrgan_ver, yomitoku_ver) =
-        tokio::join!(fetch_ai_version(&realesrgan_url), fetch_ai_version(&yomitoku_url));
+    let (realesrgan_ver, yomitoku_ver) = tokio::join!(
+        fetch_ai_version(&realesrgan_url),
+        fetch_ai_version(&yomitoku_url)
+    );
 
     let tools = ToolStatus {
         poppler: which::which("pdftoppm").is_ok(),
@@ -597,8 +591,11 @@ async fn retry_job(
     let input_path = input_path_for_job(state.worker_pool.work_dir(), id, &job.input_filename);
     if input_path.exists() {
         // Copy to new job path
-        let new_input_path =
-            input_path_for_job(state.worker_pool.work_dir(), new_job_id, &job.input_filename);
+        let new_input_path = input_path_for_job(
+            state.worker_pool.work_dir(),
+            new_job_id,
+            &job.input_filename,
+        );
         if let Some(parent) = new_input_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -643,32 +640,44 @@ fn parse_convert_options(text: &str) -> Option<ConvertOptions> {
         serde_json::from_str::<ConvertOptions>(&normalized).ok()
     }
 
-    if let Ok(parsed) = serde_json::from_str::<ConvertOptions>(text) {
-        return Some(parsed);
-    }
+    let trimmed = text.trim();
 
-    if let Ok(parsed) = serde_json::from_str::<BatchRequest>(text) {
-        return Some(parsed.options);
-    }
-
-    if let Ok(parsed_text) = serde_json::from_str::<String>(text) {
-        if let Ok(parsed) = serde_json::from_str::<ConvertOptions>(&parsed_text) {
+    // Handle payloads like \"{...}\" (double-encoded string without outer JSON quotes).
+    if trimmed.starts_with("\\\"") && trimmed.ends_with("\\\"") && trimmed.len() >= 4 {
+        let inner = &trimmed[2..trimmed.len() - 2];
+        let unescaped = inner.replace("\\\\\"", "\"").replace("\\\"", "\"");
+        if let Some(parsed) = parse_convert_options(&unescaped) {
             return Some(parsed);
         }
-        if let Ok(parsed) = serde_json::from_str::<BatchRequest>(&parsed_text) {
-            return Some(parsed.options);
-        }
     }
 
-    if let Ok(value) = serde_json::from_str::<Value>(text) {
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(raw) = value.as_str() {
+            if let Some(parsed) = parse_convert_options(raw) {
+                return Some(parsed);
+            }
+        }
+
         if let Some(options_value) = value.get("options") {
             if let Ok(parsed) = serde_json::from_value::<ConvertOptions>(options_value.clone()) {
                 return Some(parsed);
             }
         }
+
+        if let Ok(parsed) = serde_json::from_value::<ConvertOptions>(value.clone()) {
+            return Some(parsed);
+        }
     }
 
-    if let Some(parsed) = parse_relaxed_object_literal(text) {
+    if let Ok(parsed) = serde_json::from_str::<BatchRequest>(trimmed) {
+        return Some(parsed.options);
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<ConvertOptions>(trimmed) {
+        return Some(parsed);
+    }
+
+    if let Some(parsed) = parse_relaxed_object_literal(trimmed) {
         return Some(parsed);
     }
 
@@ -974,8 +983,9 @@ async fn create_batch(
         // Save uploaded file
         let input_path = input_path_for_job(state.worker_pool.work_dir(), job_id, &filename);
         if let Some(parent) = input_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| AppError::Internal(format!("Failed to create upload directory: {}", e)))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AppError::Internal(format!("Failed to create upload directory: {}", e))
+            })?;
         }
         std::fs::write(&input_path, &data)
             .map_err(|e| AppError::Internal(format!("Failed to save uploaded file: {}", e)))?;
@@ -1195,6 +1205,22 @@ mod tests {
                 realesrgan: false,
                 yomitoku: false,
             },
+            ai_services: AiVersions {
+                realesrgan: AiServiceVersion {
+                    available: false,
+                    service_version: None,
+                    torch_version: None,
+                    cuda_available: None,
+                    device: None,
+                },
+                yomitoku: AiServiceVersion {
+                    available: false,
+                    service_version: None,
+                    torch_version: None,
+                    cuda_available: None,
+                    device: None,
+                },
+            },
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"status\":\"healthy\""));
@@ -1350,8 +1376,7 @@ mod tests {
 
     #[test]
     fn test_parse_convert_options_batch_wrapped_object() {
-        let json =
-            r#"{"options":{"dpi":300,"deskew":true,"upscale":false,"ocr":true,"advanced":false},"priority":"normal"}"#;
+        let json = r#"{"options":{"dpi":300,"deskew":true,"upscale":false,"ocr":true,"advanced":false},"priority":"normal"}"#;
         let options = parse_convert_options(json).unwrap();
         assert_eq!(options.dpi, 300);
         assert!(options.deskew);

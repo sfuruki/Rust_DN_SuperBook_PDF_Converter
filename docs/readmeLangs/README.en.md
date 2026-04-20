@@ -14,14 +14,22 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Rust](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org/)
-[![CI](https://github.com/clearclown/Rust_DN_SuperBook_PDF_Converter/actions/workflows/ci.yml/badge.svg)](https://github.com/clearclown/Rust_DN_SuperBook_PDF_Converter/actions/workflows/ci.yml)
+[![CI](https://github.com/sfuruki/Rust_DN_SuperBook_Reforge/actions/workflows/ci.yml/badge.svg)](https://github.com/sfuruki/Rust_DN_SuperBook_Reforge/actions/workflows/ci.yml)
 
-> **Fork of [dnobori/DN_SuperBook_PDF_Converter](https://github.com/dnobori/DN_SuperBook_PDF_Converter)**
+> **Fork lineage:**
 >
-> A high-quality PDF enhancement tool for scanned books, fully rewritten in Rust
+> - [dnobori/DN_SuperBook_PDF_Converter](https://github.com/dnobori/DN_SuperBook_PDF_Converter) (Original)
+> - [clearclown/Rust_DN_SuperBook_PDF_Converter](https://github.com/clearclown/Rust_DN_SuperBook_PDF_Converter) (Rust fork)
+>
+> Rust_DN_SuperBook_Reforge is a derivative project in the DN_SuperBook_PDF_Converter and Rust_DN_SuperBook_PDF_Converter lineage.
+>
+> It keeps the core conversion features while reorganizing the runtime and operational structure for current environments, making the project easier to extend and maintain.
+>
+> In this derivative, the main changes are the separation of AI execution environments into HTTP microservices, partial page-level parallel execution, and more detailed progress reporting in the Web UI / WebSocket flow.
 
 **Original Author:** Daiyuu Nobori
 **Rust Rewrite:** clearclown
+**Derived / Adjusted By:** sfuruki
 **License:** AGPL v3.0
 
 ---
@@ -43,9 +51,12 @@ AI super-resolution with RealESRGAN sharpens text edges and dramatically improve
 ## Features
 
 - **Rust Implementation** - Complete rewrite from C#. Greatly improved memory efficiency and performance
+- **Separated AI Runtime** - RealESRGAN / YomiToku are separated from Rust Core and run as HTTP microservices with Docker/Podman
 - **AI Super-Resolution** - 2x upscaling with RealESRGAN
 - **Japanese OCR** - High-accuracy text recognition with YomiToku
 - **Markdown Conversion** - Generate structured Markdown from PDFs (with automatic figure/table detection)
+- **Partial Parallel Execution** - Supports page-level parallel processing, with `--threads` and `--chunk-size` for load and memory control
+- **Detailed Progress Reporting** - Extends the existing Web UI / WebSocket progress and log display with more stage-level detail
 - **Deskew Correction** - Automatic correction via Otsu binarization + Hough transform
 - **180-Degree Rotation Detection** - Automatically detect and correct upside-down pages
 - **Shadow Removal** - Automatically detect and remove book binding shadows
@@ -60,8 +71,8 @@ AI super-resolution with RealESRGAN sharpens text edges and dramatically improve
 
 ```bash
 # Build from source
-git clone https://github.com/clearclown/Rust_DN_SuperBook_PDF_Converter.git
-cd Rust_DN_SuperBook_PDF_Converter/superbook-pdf
+git clone https://github.com/sfuruki/Rust_DN_SuperBook_Reforge.git
+cd Rust_DN_SuperBook_Reforge/superbook-pdf
 cargo build --release --features web
 
 # Basic conversion

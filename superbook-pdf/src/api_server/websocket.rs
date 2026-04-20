@@ -75,10 +75,7 @@ pub enum WsMessage {
     },
     /// Log message for detailed progress display
     #[serde(rename = "log")]
-    Log {
-        job_id: Uuid,
-        message: String,
-    },
+    Log { job_id: Uuid, message: String },
     /// Page preview for real-time visualization (Phase 4.1)
     #[serde(rename = "page_preview")]
     PagePreview {
@@ -180,7 +177,6 @@ impl WsBroadcaster {
         step_name: &str,
         percent: u8,
     ) {
-
         self.broadcast(
             job_id,
             WsMessage::Progress {

@@ -118,6 +118,8 @@
 //! AGPL-3.0
 
 pub mod ai_bridge;
+#[cfg(feature = "web")]
+pub mod api_server;
 pub mod cache;
 pub mod cli;
 pub mod color_stats;
@@ -140,8 +142,6 @@ pub mod realesrgan;
 pub mod reprocess;
 pub mod util;
 pub mod vertical_detect;
-#[cfg(feature = "web")]
-pub mod api_server;
 pub mod yomitoku;
 
 // Issue #32-35: Cleanup and enhancement modules
@@ -546,8 +546,16 @@ mod tests {
 
     #[test]
     fn test_ensure_dir_writable_nonexistent() {
-        let result = ensure_dir_writable(PathBuf::from("/nonexistent/directory"));
-        assert!(result.is_err());
+        let dir = std::env::temp_dir().join("superbook_test_writable_new_dir");
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        let result = ensure_dir_writable(&dir);
+        assert!(result.is_ok());
+        assert!(dir.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ============ Error Type Conversion Tests ============

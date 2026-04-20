@@ -146,7 +146,11 @@ impl WebServer {
         let addr = self.config.socket_addr()?;
         let router = self.build_router();
 
-        println!("Starting SuperBook PDF Converter v{} on http://{}", env!("CARGO_PKG_VERSION"), addr);
+        println!(
+            "Starting SuperBook PDF Converter v{} on http://{}",
+            env!("CARGO_PKG_VERSION"),
+            addr
+        );
         println!();
         println!("API endpoints:");
         println!("  POST   /api/convert               - PDF変換開始");

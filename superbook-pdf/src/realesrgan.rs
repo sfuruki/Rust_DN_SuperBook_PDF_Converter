@@ -24,12 +24,12 @@
 //! // let result = RealEsrgan::new().upscale("input.png", "output.png", &options);
 //! ```
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-use std::sync::Arc;
-use thiserror::Error;
-use async_trait::async_trait;
 use crate::ai_bridge::{AiBridge, AiBridgeError, AiTool};
+use async_trait::async_trait;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use thiserror::Error;
 
 // ============================================================
 // Constants
@@ -442,7 +442,7 @@ impl RealEsrgan {
             actual_scale,
             processing_time: start_time.elapsed(),
             vram_used_mb: result.gpu_stats.map(|s| s.peak_vram_mb),
-        }) 
+        })
     }
 
     /// 🚀 修正: pub fn から pub async fn に変更
@@ -505,7 +505,7 @@ impl RealEsrgan {
             for entry in std::fs::read_dir(input_dir).map_err(RealEsrganError::IoError)? {
                 let entry = entry.map_err(RealEsrganError::IoError)?;
                 let path = entry.path();
-                
+
                 if path.is_file() {
                     if let Some(ext) = path.extension() {
                         let ext_lower = ext.to_string_lossy().to_lowercase();
@@ -523,7 +523,8 @@ impl RealEsrgan {
 
         // 🚀 修正: upscale_batch() は非同期関数(async fn)として定義されているため、.await が必須です
         // これにより、Future オブジェクトではなく Result<BatchUpscaleResult> が返されます [1, 4]
-        self.upscale_batch(&input_files, output_dir, options, progress).await
+        self.upscale_batch(&input_files, output_dir, options, progress)
+            .await
     }
     pub fn available_models_list(&self) -> Vec<RealEsrganModel> {
         vec![
@@ -535,7 +536,11 @@ impl RealEsrgan {
     }
 
     /// 🚀 修正(無限再帰対策): 同様に固有メソッド名を変更
-    pub fn calculate_recommended_tile_size(&self, _image_size: (u32, u32), available_vram_mb: u64) -> u32 {
+    pub fn calculate_recommended_tile_size(
+        &self,
+        _image_size: (u32, u32),
+        available_vram_mb: u64,
+    ) -> u32 {
         let scale_factor = (available_vram_mb as f64 / BASE_VRAM_MB as f64).sqrt();
         let recommended = (DEFAULT_TILE_SIZE as f64 * scale_factor) as u32;
         recommended.clamp(MIN_TILE_SIZE, MAX_TILE_SIZE)
@@ -549,11 +554,11 @@ impl RealEsrganProcessor for RealEsrgan {
     }
 
     async fn upscale_batch(
-        &self, 
-        files: &[PathBuf], 
-        out: &Path, 
+        &self,
+        files: &[PathBuf],
+        out: &Path,
         opt: &RealEsrganOptions,
-        prog: Option<Box<dyn Fn(usize, usize) + Send + Sync>>
+        prog: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
     ) -> Result<BatchUpscaleResult> {
         self.upscale_batch(files, out, opt, prog).await
     }
@@ -563,7 +568,7 @@ impl RealEsrganProcessor for RealEsrgan {
         dir: &Path,
         out: &Path,
         opt: &RealEsrganOptions,
-        prog: Option<Box<dyn Fn(usize, usize) + Send + Sync>>
+        prog: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
     ) -> Result<BatchUpscaleResult> {
         self.upscale_directory(dir, out, opt, prog).await
     }

@@ -43,6 +43,12 @@ tasks:
       - task: clippy
       - cargo fmt -- --check
 
+  release-preflight:
+    desc: Stable release preflight checks (local)
+    cmds:
+      - task: check
+      - cd .. && docker compose -f docker-compose.yml -f docker-compose.cpu.yml config > compose.rendered.yml
+
   # ===== Container =====
 
   container-build:

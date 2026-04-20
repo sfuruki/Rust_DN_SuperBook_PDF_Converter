@@ -3,9 +3,9 @@
 //! Handles the actual PDF conversion in a background task.
 
 use std::path::PathBuf;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -186,7 +186,11 @@ fn output_name_from_input_filename(input_filename: &str) -> String {
     format!("{}_superbook.pdf", stem)
 }
 
-fn preferred_output_path(output_dir: &std::path::Path, input_filename: &str, job_id: Uuid) -> PathBuf {
+fn preferred_output_path(
+    output_dir: &std::path::Path,
+    input_filename: &str,
+    job_id: Uuid,
+) -> PathBuf {
     let preferred = output_dir.join(output_name_from_input_filename(input_filename));
     if !preferred.exists() {
         return preferred;
@@ -309,7 +313,8 @@ impl JobWorker {
         let pipeline = PdfPipeline::new(config);
 
         // Create progress callback
-        let progress = WebProgressCallback::new(job_id, self.queue.clone(), self.broadcaster.clone());
+        let progress =
+            WebProgressCallback::new(job_id, self.queue.clone(), self.broadcaster.clone());
 
         // Run pipeline directly (it handles its own async/blocking balance)
         let result = pipeline
@@ -320,11 +325,15 @@ impl JobWorker {
             Ok(pipeline_result) => {
                 // Pipeline succeeded
                 let final_output_path = {
-                    let preferred = preferred_output_path(&final_output_dir, &input_filename, job_id);
+                    let preferred =
+                        preferred_output_path(&final_output_dir, &input_filename, job_id);
                     if preferred != pipeline_result.output_path {
-                        if let Err(rename_err) = std::fs::rename(&pipeline_result.output_path, &preferred) {
+                        if let Err(rename_err) =
+                            std::fs::rename(&pipeline_result.output_path, &preferred)
+                        {
                             // Handle cross-filesystem moves by copying.
-                            if let Err(copy_err) = std::fs::copy(&pipeline_result.output_path, &preferred)
+                            if let Err(copy_err) =
+                                std::fs::copy(&pipeline_result.output_path, &preferred)
                             {
                                 let error_msg = format!(
                                     "Failed to finalize output filename: rename error: {}, copy error: {}",
@@ -365,7 +374,7 @@ impl JobWorker {
 }
 
 #[cfg(test)]
-mod tests {
+mod naming_tests {
     use super::*;
 
     #[test]
@@ -374,7 +383,10 @@ mod tests {
             output_name_from_input_filename("sample-book.pdf"),
             "sample-book_superbook.pdf"
         );
-        assert_eq!(output_name_from_input_filename("noext"), "noext_superbook.pdf");
+        assert_eq!(
+            output_name_from_input_filename("noext"),
+            "noext_superbook.pdf"
+        );
     }
 }
 

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use thiserror::Error;
 
+use crate::ai_bridge::AiBridge;
 use std::sync::Arc;
-use crate::ai_bridge::{AiBridge};
 
 use crate::cli::MarkdownArgs;
 use crate::figure_detect::{FigureDetectOptions, FigureDetector, FigureRegion, PageClassification};
@@ -207,7 +207,9 @@ impl MarkdownPipeline {
             let upscaled_dir = work_dir.join("upscaled");
             std::fs::create_dir_all(&upscaled_dir)?;
 
-            let upscaled = self.step_upscale(&upscaled_dir, &current_images, progress).await?;
+            let upscaled = self
+                .step_upscale(&upscaled_dir, &current_images, progress)
+                .await?;
             current_images = upscaled;
             progress.on_step_complete("AI超解像", "完了");
         }
@@ -273,7 +275,7 @@ impl MarkdownPipeline {
         let bridge_config = crate::AiBridgeConfig::default();
         let bridge: Arc<dyn AiBridge> = Arc::new(
             crate::ai_bridge::HttpApiBridge::new(bridge_config)
-                .map_err(|e| MarkdownPipelineError::OcrError(e.to_string()))?
+                .map_err(|e| MarkdownPipelineError::OcrError(e.to_string()))?,
         );
 
         //let esrgan = crate::RealEsrgan::new(bridge.clone());
@@ -577,8 +579,9 @@ impl MarkdownPipeline {
     ) -> Result<Vec<PathBuf>, MarkdownPipelineError> {
         let bridge_config = crate::AiBridgeConfig::default();
         let bridge: Arc<dyn AiBridge> = Arc::new(
-            crate::ai_bridge::HttpApiBridge::new(bridge_config)
-                .map_err(|e| MarkdownPipelineError::Pipeline(PipelineError::ImageProcessingFailed(e.to_string())))?
+            crate::ai_bridge::HttpApiBridge::new(bridge_config).map_err(|e| {
+                MarkdownPipelineError::Pipeline(PipelineError::ImageProcessingFailed(e.to_string()))
+            })?,
         );
 
         let esrgan = crate::RealEsrgan::new(bridge);
@@ -589,10 +592,17 @@ impl MarkdownPipeline {
         let options = options.build();
 
         // 🚀 修正: upscale_batch は非同期になったため、直接 .await する [2, 5]
-        match esrgan.upscale_batch(images, output_dir, &options, None).await {
+        match esrgan
+            .upscale_batch(images, output_dir, &options, None)
+            .await
+        {
             Ok(result) => {
                 progress.on_step_complete("超解像", &format!("{}画像", result.successful.len()));
-                Ok(result.successful.iter().map(|r| r.output_path.clone()).collect())
+                Ok(result
+                    .successful
+                    .iter()
+                    .map(|r| r.output_path.clone())
+                    .collect())
             }
             Err(e) => {
                 progress.on_warning(&format!("超解像失敗: {}", e));

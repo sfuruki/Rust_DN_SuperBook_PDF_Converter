@@ -6,7 +6,7 @@ use clap::Parser;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
-use superbook_pdf::ai_bridge::{AiBridge, HttpApiBridge, AiTool};
+use superbook_pdf::ai_bridge::{AiBridge, AiTool, HttpApiBridge};
 use superbook_pdf::{
     exit_codes,
     should_skip_processing,
@@ -215,70 +215,74 @@ async fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error
 
     // 非同期ループ内で実行
     for (idx, pdf_path) in pdf_files.iter().enumerate() {
-            let output_pdf = pipeline.get_output_path(pdf_path, &output_dir);
+        let output_pdf = pipeline.get_output_path(pdf_path, &output_dir);
 
-            // キャッシュによるスキップ判定 [3]
-            if args.skip_existing && !args.force {
-                if output_pdf.exists() {
-                    if verbose {
-                        println!(
-                            "[{}/{}] Skipping (exists): {}",
-                            idx + 1,
-                            pdf_files.len(),
-                            pdf_path.display()
-                        );
-                    }
-                    skip_count += 1;
-                    continue;
+        // キャッシュによるスキップ判定 [3]
+        if args.skip_existing && !args.force {
+            if output_pdf.exists() {
+                if verbose {
+                    println!(
+                        "[{}/{}] Skipping (exists): {}",
+                        idx + 1,
+                        pdf_files.len(),
+                        pdf_path.display()
+                    );
                 }
-            } else if !args.force {
-                if let Some(cache) = should_skip_processing(pdf_path, &output_pdf, &options_json, false) {
-                    if verbose {
-                        println!(
-                            "[{}/{}] Skipping (cached, {} pages): {}",
-                            idx + 1,
-                            pdf_files.len(),
-                            cache.result.page_count,
-                            pdf_path.display()
-                        );
-                    }
-                    skip_count += 1;
-                    continue;
+                skip_count += 1;
+                continue;
+            }
+        } else if !args.force {
+            if let Some(cache) = should_skip_processing(pdf_path, &output_pdf, &options_json, false)
+            {
+                if verbose {
+                    println!(
+                        "[{}/{}] Skipping (cached, {} pages): {}",
+                        idx + 1,
+                        pdf_files.len(),
+                        cache.result.page_count,
+                        pdf_path.display()
+                    );
+                }
+                skip_count += 1;
+                continue;
+            }
+        }
+
+        if verbose {
+            println!(
+                "[{}/{}] Processing: {}",
+                idx + 1,
+                pdf_files.len(),
+                pdf_path.display()
+            );
+        }
+
+        // パイプライン処理の実行 [3, 6]
+        // 注: 内部で HTTP リクエストが発生するため、この block_on 内で実行される必要があります
+        match pipeline
+            .process_with_progress(pdf_path, &output_dir, &progress)
+            .await
+        {
+            Ok(result) => {
+                ok_count += 1;
+                // 処理成功後のキャッシュ保存 [3]
+                if let Ok(digest) = CacheDigest::new(pdf_path, &options_json) {
+                    let cache_result = result.to_cache_result();
+                    let cache = ProcessingCache::new(digest, cache_result);
+                    let _ = cache.save(&output_pdf);
+                }
+                if verbose {
+                    println!(
+                        " Completed: {} pages, {:.2}s, {} bytes",
+                        result.page_count, result.elapsed_seconds, result.output_size
+                    );
                 }
             }
-
-            if verbose {
-                println!(
-                    "[{}/{}] Processing: {}",
-                    idx + 1,
-                    pdf_files.len(),
-                    pdf_path.display()
-                );
+            Err(e) => {
+                eprintln!("Error processing {}: {}", pdf_path.display(), e);
+                error_count += 1;
             }
-
-            // パイプライン処理の実行 [3, 6]
-            // 注: 内部で HTTP リクエストが発生するため、この block_on 内で実行される必要があります
-            match pipeline.process_with_progress(pdf_path, &output_dir, &progress).await {
-                Ok(result) => {
-                    ok_count += 1;
-                    // 処理成功後のキャッシュ保存 [3]
-                    if let Ok(digest) = CacheDigest::new(pdf_path, &options_json) {
-                        let cache_result = result.to_cache_result();
-                        let cache = ProcessingCache::new(digest, cache_result);
-                        let _ = cache.save(&output_pdf);
-                    }
-                    if verbose {
-                        println!(
-                            " Completed: {} pages, {:.2}s, {} bytes",
-                            result.page_count, result.elapsed_seconds, result.output_size
-                        );
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error processing {}: {}", pdf_path.display(), e);
-                    error_count += 1;
-                }
-            }
+        }
     }
 
     let elapsed = start_time.elapsed();
@@ -323,7 +327,10 @@ async fn run_markdown(args: &MarkdownArgs) -> Result<(), Box<dyn std::error::Err
 
     let pipeline = MarkdownPipeline::from_args(args);
 
-    match pipeline.run(&args.input, &args.output, args.resume, &progress).await {
+    match pipeline
+        .run(&args.input, &args.output, args.resume, &progress)
+        .await
+    {
         Ok(result) => {
             let elapsed = start_time.elapsed();
 
@@ -472,7 +479,13 @@ fn print_execution_plan(
     println!("=== Dry Run - Execution Plan ===");
     println!();
     println!("Input: {}", args.input.display());
-    println!("Output: {}", args.output.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "(from env/default)".to_string()));
+    println!(
+        "Output: {}",
+        args.output
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(from env/default)".to_string())
+    );
     println!("Files to process: {}", pdf_files.len());
     println!();
     println!("Pipeline Configuration:");
@@ -637,7 +650,11 @@ fn run_info() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  VRAM (from {}): {:.2} GB", info.name, vram);
             }
             if let Some(cuda) = info.cuda_available {
-                println!("  CUDA (from {}): {}", info.name, if cuda { "✅" } else { "❌" });
+                println!(
+                    "  CUDA (from {}): {}",
+                    info.name,
+                    if cuda { "✅" } else { "❌" }
+                );
             }
         }
     }
@@ -665,7 +682,10 @@ struct AiServiceInfo {
 
 fn check_ai_service(name: &str, url: &str) -> Option<AiServiceInfo> {
     let version_url = format!("{}/version", url.trim_end_matches('/'));
-    match ureq::get(&version_url).timeout(std::time::Duration::from_secs(5)).call() {
+    match ureq::get(&version_url)
+        .timeout(std::time::Duration::from_secs(5))
+        .call()
+    {
         Ok(response) => {
             if let Ok(body) = response.into_string() {
                 // Parse key fields from JSON body
@@ -676,12 +696,24 @@ fn check_ai_service(name: &str, url: &str) -> Option<AiServiceInfo> {
                 let vram_total_gb = extract_json_f64(&body, "vram_total_gb");
                 let python_version = extract_json_str(&body, "python_version");
                 println!("  {}: Available (url={})", name, url);
-                if let Some(v) = service_version { println!("    Version: {}", v); }
-                if let Some(p) = python_version.as_ref() { println!("    Python: {}", p); }
-                if let Some(t) = torch { println!("    Torch: {}", t); }
-                if let Some(c) = cuda { println!("    CUDA: {}", if c { "✅" } else { "❌" }); }
-                if let Some(ref d) = device { println!("    Device: {}", d); }
-                if let Some(v) = vram_total_gb { println!("    VRAM: {:.2} GB", v); }
+                if let Some(v) = service_version {
+                    println!("    Version: {}", v);
+                }
+                if let Some(p) = python_version.as_ref() {
+                    println!("    Python: {}", p);
+                }
+                if let Some(t) = torch {
+                    println!("    Torch: {}", t);
+                }
+                if let Some(c) = cuda {
+                    println!("    CUDA: {}", if c { "✅" } else { "❌" });
+                }
+                if let Some(ref d) = device {
+                    println!("    Device: {}", d);
+                }
+                if let Some(v) = vram_total_gb {
+                    println!("    VRAM: {:.2} GB", v);
+                }
                 return Some(AiServiceInfo {
                     name: name.to_string(),
                     cuda_available: cuda,
@@ -703,8 +735,7 @@ fn extract_json_str(json: &str, key: &str) -> Option<String> {
     let pattern = format!("\"{}\":", key);
     let pos = json.find(&pattern)?;
     let rest = json[pos + pattern.len()..].trim_start();
-    if rest.starts_with('"') {
-        let inner = &rest[1..];
+    if let Some(inner) = rest.strip_prefix('"') {
         let end = inner.find('"')?;
         Some(inner[..end].to_string())
     } else {
@@ -716,9 +747,13 @@ fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
     let pattern = format!("\"{}\":", key);
     let pos = json.find(&pattern)?;
     let rest = json[pos + pattern.len()..].trim_start();
-    if rest.starts_with("true") { Some(true) }
-    else if rest.starts_with("false") { Some(false) }
-    else { None }
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn extract_json_f64(json: &str, key: &str) -> Option<f64> {
@@ -753,14 +788,12 @@ fn check_imagemagick_identify_tool() {
 fn check_python_tool() {
     if which::which("python3").is_ok() {
         check_tool_with_version("python3", "Python (Core)", &["--version"]);
+    } else if which::which("python").is_ok() {
+        check_tool_with_version("python", "Python (Core)", &["--version"]);
     } else {
-        if which::which("python").is_ok() {
-            check_tool_with_version("python", "Python (Core)", &["--version"]);
-        } else {
-            println!(
-                "  Python (Core): Not found (expected: Python is provided by AI service containers)"
-            );
-        }
+        println!(
+            "  Python (Core): Not found (expected: Python is provided by AI service containers)"
+        );
     }
 }
 

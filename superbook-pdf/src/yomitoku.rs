@@ -77,7 +77,6 @@ pub enum YomiTokuError {
 
     #[error("AI Bridge error: {0}")]
     BridgeError(#[from] AiBridgeError),
-  
 }
 
 pub type Result<T> = std::result::Result<T, YomiTokuError>;
@@ -312,7 +311,10 @@ impl YomiToku {
 
     /// YomiTokuが利用可能かチェック
     pub async fn is_available(&self) -> bool {
-        self.bridge.check_tool(AiTool::YomiToku).await.unwrap_or(false)
+        self.bridge
+            .check_tool(AiTool::YomiToku)
+            .await
+            .unwrap_or(false)
     }
 
     /// 単一画像のOCR処理 (非同期)
@@ -324,28 +326,36 @@ impl YomiToku {
 
         // 🚀 修正: 一時ディレクトリの作成 (ゼロコピー転送の結果受け取り用)
         let temp_output_dir = std::env::temp_dir().join(format!("yomitoku_{}", std::process::id()));
-        std::fs::create_dir_all(&temp_output_dir)
-            .map_err(|e| YomiTokuError::ExecutionFailed(format!("Failed to create temp dir: {}", e)))?;
+        std::fs::create_dir_all(&temp_output_dir).map_err(|e| {
+            YomiTokuError::ExecutionFailed(format!("Failed to create temp dir: {}", e))
+        })?;
 
         // AIブリッジ経由で実行 (HTTPモードまたはサブプロセスモード)
         // 🚀 修正: .await を追加し、結果を非同期で待機
-        let result = self.bridge.execute(
-            AiTool::YomiToku,
-            &[input_path.to_path_buf()],
-            &temp_output_dir,
-            options,
-        ).await.map_err(YomiTokuError::BridgeError)?;
+        let result = self
+            .bridge
+            .execute(
+                AiTool::YomiToku,
+                &[input_path.to_path_buf()],
+                &temp_output_dir,
+                options,
+            )
+            .await
+            .map_err(YomiTokuError::BridgeError)?;
 
         // 実行結果から出力を取得
         let output_json = if let Some(processed_file) = result.processed_files.first() {
             // ブリッジ側が保存したJSONの結果を読み込む
             // (HttpApiBridgeの実装に合わせて調整が必要な場合があります)
-            std::fs::read_to_string(processed_file)
-                .map_err(|e| YomiTokuError::ExecutionFailed(format!("Failed to read output: {}", e)))?
+            std::fs::read_to_string(processed_file).map_err(|e| {
+                YomiTokuError::ExecutionFailed(format!("Failed to read output: {}", e))
+            })?
         } else if let Some((_, error)) = result.failed_files.first() {
             return Err(YomiTokuError::ExecutionFailed(error.clone()));
         } else {
-            return Err(YomiTokuError::ExecutionFailed("No output from bridge".to_string()));
+            return Err(YomiTokuError::ExecutionFailed(
+                "No output from bridge".to_string(),
+            ));
         };
 
         // 一時ディレクトリのクリーンアップ
@@ -356,12 +366,17 @@ impl YomiToku {
             .map_err(|e| YomiTokuError::ExecutionFailed(format!("Parse error: {}", e)))?;
 
         if let Some(error) = json_result.get("error") {
-            return Err(YomiTokuError::ExecutionFailed(error.as_str().unwrap_or("Unknown error").into()));
+            return Err(YomiTokuError::ExecutionFailed(
+                error.as_str().unwrap_or("Unknown error").into(),
+            ));
         }
 
         let text_blocks = self.parse_bridge_output(&json_result)?;
-        let overall_confidence = json_result.get("confidence").and_then(|c| c.as_f64()).unwrap_or(0.0) as f32;
-        
+        let overall_confidence = json_result
+            .get("confidence")
+            .and_then(|c| c.as_f64())
+            .unwrap_or(0.0) as f32;
+
         let text_direction = match json_result.get("text_direction").and_then(|d| d.as_str()) {
             Some("vertical") => TextDirection::Vertical,
             Some("horizontal") => TextDirection::Horizontal,
@@ -517,7 +532,7 @@ impl YomiToku {
                 _ => TextDirection::Horizontal,
             };
 
-                // 矩形の高さ（横書き）または幅（縦書き）からフォントサイズを推定
+            // 矩形の高さ（横書き）または幅（縦書き）からフォントサイズを推定
             let estimated_font_size = if direction == TextDirection::Vertical {
                 bbox_arr.2 as f32 // 縦書きなら幅を基準
             } else {
