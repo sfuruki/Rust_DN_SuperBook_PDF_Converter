@@ -33,6 +33,7 @@ import json
 import os
 import sys
 import time
+import threading
 from pathlib import Path
 
 try:
@@ -63,14 +64,32 @@ MODEL_URLS = {
     "RealESRGAN_x4plus_anime_6B.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
 }
 
+MODEL_MIN_BYTES = {
+    "RealESRGAN_x4plus.pth": 60 * 1024 * 1024,
+    "RealESRGAN_x2plus.pth": 30 * 1024 * 1024,
+    "RealESRGAN_x4plus_anime_6B.pth": 15 * 1024 * 1024,
+}
+
+
+# Reuse loaded upsampler instances across requests to avoid repeated model init.
+_UPSAMPLER_CACHE = {}
+_UPSAMPLER_CACHE_LOCK = threading.Lock()
+_ACTIVE_UPSCALE_COUNT = 0
+_ACTIVE_UPSCALE_COND = threading.Condition(threading.Lock())
+
 
 def download_model(model_filename: str, target_path: Path) -> bool:
     """Download model weights if not present."""
     import urllib.request
     import ssl
+    import shutil
     
-    if target_path.exists():
+    min_bytes = MODEL_MIN_BYTES.get(model_filename, 1)
+    if target_path.exists() and target_path.stat().st_size >= min_bytes:
         return True
+    if target_path.exists() and target_path.stat().st_size < min_bytes:
+        print(f"Corrupt/incomplete model detected, re-downloading: {target_path}", file=sys.stderr)
+        target_path.unlink(missing_ok=True)
     
     url = MODEL_URLS.get(model_filename)
     if not url:
@@ -80,16 +99,26 @@ def download_model(model_filename: str, target_path: Path) -> bool:
     print(f"Downloading model: {model_filename}...", file=sys.stderr)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     
+    tmp_path = target_path.with_suffix(target_path.suffix + ".download")
     try:
         # Create SSL context that doesn't verify certificates (for GitHub redirects)
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        
-        urllib.request.urlretrieve(url, target_path)
+
+        with urllib.request.urlopen(url, context=ctx, timeout=60) as resp, open(tmp_path, "wb") as out_f:
+            shutil.copyfileobj(resp, out_f)
+
+        if tmp_path.stat().st_size < min_bytes:
+            raise RuntimeError(
+                f"Downloaded file too small: {tmp_path.stat().st_size} bytes (expected >= {min_bytes})"
+            )
+
+        tmp_path.replace(target_path)
         print(f"Downloaded: {target_path}", file=sys.stderr)
         return True
     except Exception as e:
+        tmp_path.unlink(missing_ok=True)
         print(f"Download failed: {e}", file=sys.stderr)
         return False
 
@@ -159,39 +188,57 @@ def get_model(model_name: str, scale: int):
     return model, netscale, str(model_path)
 
 
-def upscale_image(
-    input_path: Path,
-    output_path: Path,
-    scale: int = 2,
-    tile: int = 400,
-    gpu_id: int = 0,
-    model_name: str = "realesrgan-x4plus",
-    fp32: bool = False,
-) -> dict:
-    """Upscale a single image."""
-    start_time = time.time()
+def cleanup_upsampler(wait_timeout: float = 3.0) -> bool:
+    """Clean up cached upsamplers and free GPU memory.
 
-    # Load model
-    model, netscale, model_path = get_model(model_name, scale)
+    Returns True when cleanup was executed, False when skipped because
+    active upscale requests are still running.
+    """
+    global _UPSAMPLER_CACHE
+    deadline = time.time() + wait_timeout
+    with _ACTIVE_UPSCALE_COND:
+        while _ACTIVE_UPSCALE_COUNT > 0 and time.time() < deadline:
+            _ACTIVE_UPSCALE_COND.wait(timeout=0.2)
+        if _ACTIVE_UPSCALE_COUNT > 0:
+            print(
+                f"Cleanup skipped: {_ACTIVE_UPSCALE_COUNT} active upscale request(s)",
+                file=sys.stderr,
+            )
+            return False
 
-    # Calculate output scale (model scale may differ from requested scale)
-    outscale = scale
+    with _UPSAMPLER_CACHE_LOCK:
+        for key in list(_UPSAMPLER_CACHE.keys()):
+            upsampler = _UPSAMPLER_CACHE[key]
+            if hasattr(upsampler, 'model') and upsampler.model is not None:
+                upsampler.model = upsampler.model.cpu()
+                del upsampler.model
+            del _UPSAMPLER_CACHE[key]
+            print(f"UPSAMPLER cleaned: {key}", file=sys.stderr)
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("GPU memory cache cleared", file=sys.stderr)
 
-    # Check for model weights
-    if not os.path.exists(model_path):
-        # Try alternate locations
-        alt_paths = [
-            f"~/.cache/realesrgan/{os.path.basename(model_path)}",
-            f"/usr/share/realesrgan/{os.path.basename(model_path)}",
-        ]
-        for alt in alt_paths:
-            alt = os.path.expanduser(alt)
-            if os.path.exists(alt):
-                model_path = alt
-                break
+    return True
 
-    try:
-        # Initialize upsampler
+
+def get_or_create_upsampler(
+    model_name: str,
+    scale: int,
+    tile: int,
+    gpu_id: int,
+    fp32: bool,
+):
+    """Get cached RealESRGANer instance or create a new one."""
+    cache_key = (model_name, scale, tile, gpu_id, fp32)
+    with _UPSAMPLER_CACHE_LOCK:
+        cached = _UPSAMPLER_CACHE.get(cache_key)
+        if cached is not None:
+            print(f"MODEL_CACHE hit: {cache_key}", file=sys.stderr)
+            return cached
+
+        print(f"MODEL_CACHE miss: {cache_key}", file=sys.stderr)
+        model, netscale, model_path = get_model(model_name, scale)
         upsampler = RealESRGANer(
             scale=netscale,
             model_path=model_path,
@@ -202,43 +249,79 @@ def upscale_image(
             half=not fp32,
             device=f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu",
         )
-    except RuntimeError as e:
-        if "CUDA" in str(e) or "GPU" in str(e):
-            return {"error": str(e), "exit_code": EXIT_GPU_ERROR}
-        raise
+        _UPSAMPLER_CACHE[cache_key] = upsampler
+        return upsampler
 
-    # Read image
-    img = cv2.imread(str(input_path), cv2.IMREAD_UNCHANGED)
-    if img is None:
-        return {"error": f"Failed to read image: {input_path}", "exit_code": EXIT_INPUT_NOT_FOUND}
 
-    original_size = img.shape[:2]
+def upscale_image(
+    input_path: Path,
+    output_path: Path,
+    scale: int = 2,
+    tile: int = 400,
+    gpu_id: int = 0,
+    model_name: str = "realesrgan-x4plus",
+    fp32: bool = False,
+) -> dict:
+    """Upscale a single image."""
+    global _ACTIVE_UPSCALE_COUNT
+    start_time = time.time()
+
+    with _ACTIVE_UPSCALE_COND:
+        _ACTIVE_UPSCALE_COUNT += 1
+
+    # Calculate output scale (model scale may differ from requested scale)
+    outscale = scale
 
     try:
-        # Upscale
-        output, _ = upsampler.enhance(img, outscale=outscale)
-    except RuntimeError as e:
-        if "out of memory" in str(e).lower():
-            return {"error": "Out of memory", "exit_code": EXIT_OOM}
-        raise
+        try:
+            upsampler = get_or_create_upsampler(
+                model_name=model_name,
+                scale=scale,
+                tile=tile,
+                gpu_id=gpu_id,
+                fp32=fp32,
+            )
+        except RuntimeError as e:
+            if "CUDA" in str(e) or "GPU" in str(e):
+                return {"error": str(e), "exit_code": EXIT_GPU_ERROR}
+            raise
 
-    # Save output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(output_path), output)
+        # Read image
+        img = cv2.imread(str(input_path), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return {"error": f"Failed to read image: {input_path}", "exit_code": EXIT_INPUT_NOT_FOUND}
 
-    elapsed = time.time() - start_time
-    output_size = output.shape[:2]
+        original_size = img.shape[:2]
 
-    return {
-        "input_path": str(input_path),
-        "output_path": str(output_path),
-        "original_size": list(original_size),
-        "output_size": list(output_size),
-        "scale": scale,
-        "model": model_name,
-        "processing_time": elapsed,
-        "exit_code": EXIT_SUCCESS,
-    }
+        try:
+            # Upscale
+            output, _ = upsampler.enhance(img, outscale=outscale)
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                return {"error": "Out of memory", "exit_code": EXIT_OOM}
+            raise
+
+        # Save output
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(output_path), output)
+
+        elapsed = time.time() - start_time
+        output_size = output.shape[:2]
+
+        return {
+            "input_path": str(input_path),
+            "output_path": str(output_path),
+            "original_size": list(original_size),
+            "output_size": list(output_size),
+            "scale": scale,
+            "model": model_name,
+            "processing_time": elapsed,
+            "exit_code": EXIT_SUCCESS,
+        }
+    finally:
+        with _ACTIVE_UPSCALE_COND:
+            _ACTIVE_UPSCALE_COUNT = max(0, _ACTIVE_UPSCALE_COUNT - 1)
+            _ACTIVE_UPSCALE_COND.notify_all()
 
 
 def main():

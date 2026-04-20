@@ -388,9 +388,9 @@ impl RealEsrgan {
             return Err(RealEsrganError::InputNotFound(input_path.to_path_buf()));
         }
 
-        // 元画像のサイズを取得し、処理時間を計測開始 [2]
-        let img = image::open(input_path).map_err(|e| RealEsrganError::ImageError(e.to_string()))?;
-        let original_size = (img.width(), img.height());
+        // 元画像のサイズを取得（ヘッダーのみ読み取り、フルデコード不要）
+        let original_size = image::image_dimensions(input_path)
+            .map_err(|e| RealEsrganError::ImageError(e.to_string()))?;
         let start_time = std::time::Instant::now();
 
         // 出力先ディレクトリの準備
@@ -427,8 +427,9 @@ impl RealEsrgan {
             )));
         }
 
-        let output_img = image::open(output_path).map_err(|e| RealEsrganError::ImageError(e.to_string()))?;
-        let upscaled_size = (output_img.width(), output_img.height());
+        // 出力サイズをヘッダーのみで取得（フルデコード不要）
+        let upscaled_size = image::image_dimensions(output_path)
+            .map_err(|e| RealEsrganError::ImageError(e.to_string()))?;
         let actual_scale = upscaled_size.0 as f32 / original_size.0 as f32;
 
         // 🚀 修正(E0308対策): 末尾にセミコロン「;」を付けないでください

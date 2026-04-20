@@ -450,7 +450,7 @@ impl ImageProcDeskewer {
 
     /// Check if a grayscale image is upside down by ink density analysis.
     fn is_upside_down(gray: &GrayImage) -> bool {
-        let (_width, height) = gray.dimensions();
+        let (width, height) = gray.dimensions();
         if height < 20 {
             return false;
         }
@@ -466,6 +466,14 @@ impl ImageProcDeskewer {
         let tenth = height / 10;
         let top_10_ink = Self::count_ink_pixels(gray, 0, tenth, threshold);
         let bottom_10_ink = Self::count_ink_pixels(gray, height - tenth, height, threshold);
+
+        // Safeguard: pages with very little text/image content are unstable for
+        // top-vs-bottom ratio heuristics and should not be auto-rotated.
+        let total_pixels = (width as u64).saturating_mul(height as u64);
+        let min_band_ink = ((total_pixels as f64) * 0.003) as u64; // 0.3% of full page
+        if top_ink + bottom_ink < min_band_ink.saturating_mul(2) {
+            return false;
+        }
 
         // Heuristic: if bottom has significantly more ink than top in BOTH
         // quarter and tenth regions, likely upside down.
@@ -486,8 +494,11 @@ impl ImageProcDeskewer {
             1.0
         };
 
-        // Must have strong evidence from both checks
-        quarter_ratio > 2.0 && tenth_ratio > 1.5
+        // Must have strong evidence from both checks and absolute ink differences.
+        quarter_ratio > 2.8
+            && tenth_ratio > 2.0
+            && bottom_ink > top_ink.saturating_add(min_band_ink)
+            && bottom_10_ink > top_10_ink.saturating_add(min_band_ink / 2)
     }
 
     /// Count dark (ink) pixels in a horizontal band of the image.

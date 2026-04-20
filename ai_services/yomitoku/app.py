@@ -7,11 +7,15 @@ import torch
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 # 既存のブリッジロジックをインポート（フォルダ移動済み前提）
 import yomitoku_bridge as bridge
+
+# GPU は1基想定。OCRリクエストの同時実行を抑止して OOM を防ぐ
+_GPU_SEMAPHORE: asyncio.Semaphore | None = None
 
 app = FastAPI(
     title="SuperBook AI OCR Service",
@@ -29,10 +33,14 @@ class OcrRequest(BaseModel):
 # --- 起動時のウォームアップ (設計案より) ---
 @app.on_event("startup")
 async def warmup():
-    """
-    サーバー起動時にダミー画像を推論し、OCRモデルをGPUメモリにロードする。
-    これにより、実際の処理リクエスト時の「Cold Start」遅延を防止します。
-    """
+    """起動時ウォームアップ。デフォルトは無効（最終実行速度優先）。"""
+    global _GPU_SEMAPHORE
+    _GPU_SEMAPHORE = asyncio.Semaphore(1)
+
+    if os.getenv("AI_STARTUP_WARMUP", "0").lower() not in {"1", "true", "yes", "on"}:
+        print("Startup warmup is disabled (AI_STARTUP_WARMUP!=1).")
+        return
+
     print("Initializing YomiToku model and warming up GPU...")
     try:
         # 128x128の白紙ダミー画像を作成して推論
@@ -82,6 +90,21 @@ async def get_version():
         "vram_total_gb": torch.cuda.get_device_properties(0).total_memory / 1e9 if (torch and torch.cuda.is_available()) else 0
     }
 
+@app.post("/cleanup")
+async def cleanup():
+    """Clean up cached models and free GPU memory."""
+    try:
+        cleaned = await asyncio.to_thread(bridge.cleanup_analyzer)
+        if cleaned:
+            return {"status": "ok", "message": "Analyzer cache cleared and GPU memory freed"}
+        return JSONResponse(
+            status_code=202,
+            content={"status": "busy", "message": "Cleanup deferred: active OCR request(s)"},
+        )
+    except Exception as e:
+        print(f"Cleanup failed: {e}", file=sys.stderr)
+        return {"status": "error", "message": str(e)}
+
 @app.post("/ocr")
 async def perform_ocr(req: OcrRequest):
     """
@@ -96,13 +119,14 @@ async def perform_ocr(req: OcrRequest):
 
     try:
         # 既存のブリッジロジックを使用して画像処理を実行 [3]
-        result = await asyncio.to_thread(
-            bridge.process_image,
-            input_p,
-            "json",
-            req.gpu_id,
-            req.confidence,
-        )
+        async with _GPU_SEMAPHORE:
+            result = await asyncio.to_thread(
+                bridge.process_image,
+                input_p,
+                "json",
+                req.gpu_id,
+                req.confidence,
+            )
 
         if result.get("exit_code") != 0:
             raise Exception(result.get("error", "Unknown error in YomiToku logic"))

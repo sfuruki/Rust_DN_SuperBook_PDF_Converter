@@ -1,10 +1,146 @@
-4層マイクロサービス構成によるAI電子書籍変換基盤の再構築案Windows 11のクリーンな状態から、**「ホスト汚染ゼロ」と「4層マイクロサービス構成（Web UI / Rust Core / Upscale / OCR）」**を完璧に実現するための再構築プランを提示します。この設計は、以前の単一コンテナ構成から脱却し、**拡張性・安定性・開発効率を極限まで高めた「最終形態」**となります。新しい物理ディレクトリ構造 リポジトリ直下を整理し、各コンポーネントを物理的に完全に分離します。 Rust_DN_SuperBook_PDF_Converter/ ├── .devcontainer/ # 開発環境の定義 ├── web_ui/ # 【新規】フロントエンド層 (Nginx) │ ├── static/ # HTML/JS/CSSファイル │ ├── nginx.conf # Nginx設定 │ └── Dockerfile # フロントエンド専用イメージ ├── superbook-pdf/ # バックエンド層 (Rust Core) │ ├── src/ # Rustソース [3] │ ├── Cargo.toml # [4] │ └── Dockerfile # Rust Core専用の軽量イメージ ├── ai_services/ # AI実行層 (API化) │ ├── realesrgan/ │ │ ├── app.py # FastAPI実装 (★ウォームアップ/バージョンAPI) │ │ ├── Dockerfile # Torch 1.x / CUDA 11.8 [2] │ │ └── requirements.txt # [5] │ └── yomitoku/ │ ├── app.py # FastAPI実装 (★ウォームアップ/バージョンAPI) │ ├── Dockerfile # Torch 2.x / CUDA 12.1 │ └── requirements.txt └── data/ # 共有データ領域 ├── input/ # 入力PDF ├── output/ # 出力PDF └── work/ # 全コンテナ共通のゼロコピー作業領域
-全体を統合する docker-compose.yml 3層から4層へ、そして「安定版(stable)」と「開発版(dev)」を両立させた定義です。 services:--- フロントエンド: Web UI ---frontend: build: ./web_ui ports: - "8080:80" depends_on: rust-core-stable: condition: service_healthy--- 司令塔(安定版): Rust Core Stable ---rust-core-stable: build: context: ./superbook-pdf dockerfile: Dockerfile volumes: - ./data:/data environment: - REALESRGAN_API_URL=http://realesrgan-api:8000 - YOMITOKU_API_URL=http://yomitoku-api:8000 deploy: resources: reservations: devices: [{driver: nvidia, count: all, capabilities: [gpu]}]--- AIサービス: 超解像 API ---realesrgan-api: build: ./ai_services/realesrgan healthcheck: test: ["CMD", "curl", "-f", "http://localhost:8000/version"] # バージョンAPIでReady確認 interval: 30s start_period: 60s # モデルロード時間を考慮--- AIサービス: OCR API ---yomitoku-api:build: ./ai_services/yomitokuhealthcheck:test: ["CMD", "curl", "-f", "http://localhost:8000/version"]interval: 30sstart_period: 60s各レイヤーの実装変更ポイント ① AIサービスのAPI化 (app.py) 従来のブリッジスクリプト を FastAPI でラップします。 ウォームアップ (提案2): @app.on_event("startup") で、ダミー画像を1枚推論し、モデルをGPUメモリに展開させます。 バージョンAPI (提案8): /version エンドポイントを実装し、CUDAやTorchのバージョンを返却します。 ゼロコピー: 画像データそのものではなく、/data/work/xxx.png というパス文字列をJSONで受け取ります。 ② Rust Coreの通信抽象化 (ai_bridge.rs) [完了]
-HttpApiBridge を実装済み。reqwest クライアントを使い、AIサービスのURLと通信します。
-ハンドシェイク: 起動時に各APIの /version を確認し、Torch/CUDAバージョンを検証します。
-古いSubprocessBridge はすべて削除され、HTTPアーキテクチャに統一されています。 ③ フロントエンドの独立 (web_ui/) 現在 superbook-pdf/static にあるファイルを ./web_ui/static へ移動します 。 Nginxコンテナとして独立させることで、Rust側のビルドを待たずにUIの微調整（CSSの変更など）が可能になります。
-運用と「Push」の仕組み 開発環境 (dev): VS Codeの DevContainer で rust-core-dev を起動します。
-AIサービス (realesrgan-api, yomitoku-api) はDocker経由で環境変数 REALESRGAN_API_URL、YOMITOKU_API_URL で指定されたエンドポイント経由で通信されます。
-安定版への反映 (push): 開発版で info コマンド 等による検証が完了したら、Gitでコミットします。 
-デプロイ: docker compose build を実行すると、最新のコードが各コンテナのイメージ内に COPY され、固定された「安定版」が生成されます。
-再構築後のメリット（再確認） 安定: RealESRGAN (Torch 1.x) と YomiToku (Torch 2.x) の環境が物理的に分離され、二度と衝突しません 。 効率: /data/work の共有により、巨大な画像データのコンテナ間転送コストがゼロになります。 拡張: 将来的に別のAI（翻訳等）を追加したい場合、ai_services/ に新しいフォルダを増やすだけで完了します。 この構成を決定稿として固定します。PCが利用可能になりましたら、この構造に従ってフォルダを作成し、各 Dockerfile の分割から着手しましょう。
+# 4層マイクロサービス構成によるAI電子書籍変換基盤の構築方針
+
+最終更新: 2026-04-20
+
+## 1. 目的
+
+- ホスト汚染ゼロを維持する
+- 4層マイクロサービス構成を維持する
+  - Web UI
+  - Rust Core
+  - Upscale API
+  - OCR API
+- 大規模PDF処理時の安定性を優先する
+
+## 2. ディレクトリ構成
+
+- web_ui/
+  - Nginxベースのフロントエンド
+- superbook-pdf/
+  - Rust Core
+- ai_services/realesrgan/
+  - 超解像 FastAPI
+- ai_services/yomitoku/
+  - OCR FastAPI
+- data/
+  - input, output, work の共有データ領域
+
+## 3. コンテナ設計方針
+
+- docker-compose で4サービスを統合する
+- 依存関係は healthcheck ベースで連携する
+- Rust Core は環境変数で AI API URL を参照する
+  - REALESRGAN_API_URL
+  - YOMITOKU_API_URL
+- AIサービス間はゼロコピーでパス文字列を受け渡す
+
+## 4. 実装済み要点
+
+- RealESRGAN, YomiToku の /version API 実装済み
+- Rust Core の HttpApiBridge 実装済み
+- 起動時ハンドシェイク (/version) 実装済み
+- AIサービスの workers は両方 1 で統一済み
+  - VRAM断片化と cleanup 片寄りの抑制
+
+## 5. 継続検証結果 (2026-04-20)
+
+- fix5v2 の5並行実行で全ジョブ成功 (RealESRGAN + YomiToku 直列化済み)
+  - EXIT: A=0 B=0 C=0 D=0 E=0
+  - 超解像失敗: 0件 (全5ジョブ)
+  - RealESRGAN cleanup: 4件 deferred (service busy) / 1件 freed (最後のジョブ)
+  - YomiToku cleanup: 5/5 freed
+  - Total time: a=125.72s / b=81.96s / c=215.90s / d=255.09s / e=170.52s
+- yosem2 の2並行実行で全ジョブ成功 (YomiTokuセマフォ導入後)
+  - EXIT_A=0 EXIT_B=0
+  - yosem2-a.log: 超解像失敗 0, Total time 119.28s
+  - yosem2-b.log: 超解像失敗 0, Total time 80.51s
+  - cleanup: RealESRGAN 200/202仕様動作, YomiToku cleanup成功
+- real2 の実ファイル2並行実行でも全ジョブ成功 (test10p.pdf)
+  - peak_concurrent=3
+  - EXIT_A=0 EXIT_B=0
+  - real2-a.log: RealESRGAN freed, YomiToku freed, Total time 983.03s
+  - real2-b.log: RealESRGAN deferred (service busy), YomiToku freed, Total time 941.54s
+  - 実ファイルでも cleanup 200/202 契約内で安定動作を確認
+- 全サービス healthy 維持を確認
+
+## 6. 構築方針との差分整理
+
+### 6.1 未実装点
+
+- .devcontainer の実体ファイルが未作成
+- rust-core-dev 運用導線が未整備
+
+### 6.2 変更点
+
+- RealESRGAN 側に GPU 直列化を導入
+  - asyncio.Semaphore(1) で /upscale を直列化
+- YomiToku 側に GPU 直列化を導入
+  - asyncio.Semaphore(1) で /ocr を直列化
+- Rust Core 側 HTTP timeout を 900秒へ拡張
+  - N並行時の待機キューを吸収
+- cleanup 202 (busy) を非致命扱いに変更
+- Post-GPU 遅延対策
+  - image::open ではなく image_dimensions を使用
+
+### 6.3 追記したほうが良い運用項目
+
+- GPU同時実行ポリシーを明文化
+  - RealESRGAN は必ず直列化
+  - YomiToku も必要に応じて同様に直列化
+- timeout 設計ルールの明文化
+  - 直列GPUキュー時は待機時間込みで設定
+- cleanup 応答契約の明文化
+  - 200 成功だけでなく 202 busy を正当応答とする
+- 本番反映手順の明文化
+  - 検証用途の docker cp と本番用途の build/recreate を分離
+- 受け入れ試験の定型化
+  - N=1,2,5 の exit, 失敗件数, cleanup, 所要時間, GPUメモリ確認
+
+## 7. 運用ルール
+
+- 安定版反映は docker compose build と force-recreate を原則とする
+- 単発ホットパッチは検証目的に限定する
+- 性能改善は品質劣化がないことを前提に適用する
+
+## 8. 将来構想
+
+- stable 確立までは GPU 系 AI サービスの直列化を維持する
+- 将来の性能改善候補として、OOM を回避しながら UPSCALE の実効スループットを上げる仕組みを検討する
+  - 単純な並行数引き上げは行わない
+  - 1ジョブあたりのピーク VRAM を下げたうえで段階的に検証する
+- 将来案の主方針は GPUワーカー + 動的 1〜2 本制御 とする
+  - CPU 側の前後処理は並列のまま進める
+  - GPU 実行直前で専用キューに集約する
+  - GPU ワーカーが画像サイズと VRAM 状況を見て 1 本または 2 本を許可する
+- 想定する将来案
+  - 画像サイズに応じて UPSCALE の並行許可本数を動的制御する
+  - tile_size を固定値ではなく GPU メモリ状況に応じて切り替える
+  - 小さい画像は 2 本並列、大きい画像は 1 本直列のような安全側制御を導入する
+  - 必要に応じて VRAM 使用量の観測値をもとに自動でフェイルバックする
+- 判定ロジック候補
+  - 入力値として、画像の width, height, 画素数, scale, tile_size, 直近の VRAM 使用量を参照する
+  - 第1段階では単純なルールベースで判定し、学習的な最適化は行わない
+  - 暫定ルール案
+    - 小サイズ画像: 画素数がしきい値以下なら 2 本並列を許可する
+    - 大サイズ画像: 画素数がしきい値超過なら 1 本直列へ落とす
+    - VRAM 高水位到達時: 新規 UPSCALE は 1 本へ制限し、tile_size も低メモリ側へ切り替える
+    - OOM または timeout 発生時: 同条件の後続ジョブは自動的に保守側設定へフォールバックする
+  - 保守側設定の候補
+    - 並行数 1
+    - tile_size 128 または 192
+    - timeout は待機時間込みで延長側を採用する
+  - 観測値の保持方針
+    - 実行ごとの入力画像サイズ、tile_size、処理時間、成否、OOM 有無を記録する
+    - 安全な組み合わせが確認できるまでは固定しきい値で運用する
+    - 実測が十分に蓄積した後にのみ、しきい値や並行許可本数を見直す
+- 前提条件
+  - N=1,2,5 の回帰で exit, cleanup, 所要時間, 失敗件数が安定していること
+  - 実ファイルを含む検証で OOM やタイムアウト再発がないこと
+  - 画像サイズ別に安全な tile_size と並行数の対応表を作成できること
+- この将来案は stable 化完了後に別フェーズで検討し、現時点では未実装とする
+
+## 9. 次の実装優先度
+
+1. .devcontainer と rust-core-dev 導線整備
+2. 受け入れ試験スクリプト化 (N=1,2,5)
+3. YomiToku セマフォ導入後の N=5 再回帰を定期ジョブ化

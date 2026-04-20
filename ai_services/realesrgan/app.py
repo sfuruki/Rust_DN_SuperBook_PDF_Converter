@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 import sys
@@ -6,12 +7,16 @@ import cv2
 import numpy as np
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 # 既存のブリッジロジックをインポート [2]
 import realesrgan_bridge as bridge
+
+# GPU は1基のみ。同時リクエストをシリアライズして CUDA OOM を防ぐ
+_GPU_SEMAPHORE: asyncio.Semaphore | None = None
 
 app = FastAPI(
     title="SuperBook AI Upscale Service",
@@ -29,8 +34,14 @@ class UpscaleRequest(BaseModel):
     gpu_id: int = Field(0)
 
 @app.on_event("startup")
-async def warmup():
-    """起動時にダミー画像を推論し、モデルをGPUメモリにロードする [1, 3]"""
+async def startup_event():
+    global _GPU_SEMAPHORE
+    _GPU_SEMAPHORE = asyncio.Semaphore(1)
+    """起動時ウォームアップ。デフォルトは無効（最終実行速度優先）"""
+    if os.getenv("AI_STARTUP_WARMUP", "0").lower() not in {"1", "true", "yes", "on"}:
+        print("Startup warmup is disabled (AI_STARTUP_WARMUP!=1).")
+        return
+
     print("Initializing model and warming up GPU...")
     try:
         dummy_img = np.zeros((16, 16, 3), dtype=np.uint8)
@@ -59,6 +70,21 @@ async def get_version():
         "cuda_available": torch.cuda.is_available(),
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
     }
+
+@app.post("/cleanup")
+async def cleanup():
+    """Clean up cached models and free GPU memory."""
+    try:
+        cleaned = await asyncio.to_thread(bridge.cleanup_upsampler)
+        if cleaned:
+            return {"status": "ok", "message": "Upsampler cache cleared and GPU memory freed"}
+        return JSONResponse(
+            status_code=202,
+            content={"status": "busy", "message": "Cleanup deferred: active upscale request(s)"},
+        )
+    except Exception as e:
+        print(f"Cleanup failed: {e}", file=sys.stderr)
+        return {"status": "error", "message": str(e)}
 
 @app.post("/upscale")
 async def upscale(req: UpscaleRequest):
@@ -90,16 +116,18 @@ async def upscale(req: UpscaleRequest):
         raise HTTPException(status_code=400, detail=f"Input file not found: {req.input_path}")
 
     try:
-        # 変換後のモデル名を使用してブリッジを呼び出す
-        result = bridge.upscale_image(
-            input_path=input_p,
-            output_path=output_p,
-            scale=req.scale,
-            tile=req.tile,
-            model_name=effective_model_name,
-            gpu_id=req.gpu_id,
-            fp32=req.fp32
-        )
+        # GPU は1基のみ。セマフォで同時アクセスを1件に制限（CUDA OOM 防止）
+        async with _GPU_SEMAPHORE:
+            result = await asyncio.to_thread(
+                bridge.upscale_image,
+                input_path=input_p,
+                output_path=output_p,
+                scale=req.scale,
+                tile=req.tile,
+                model_name=effective_model_name,
+                gpu_id=req.gpu_id,
+                fp32=req.fp32
+            )
         print(f"DEBUG: Upscale completed: {result}")
         return result
     except Exception as e:

@@ -129,6 +129,25 @@
             border-radius: 4px;
         }
 
+        .option-item-stacked {
+            display: block;
+        }
+
+        .option-main {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .option-note {
+            display: block;
+            margin-top: 4px;
+            margin-left: 26px;
+            color: #666;
+            font-size: 0.82rem;
+            line-height: 1.35;
+        }
+
         /* Slider styling */
         .slider-container {
             display: flex;
@@ -391,6 +410,12 @@
             background: #43a047;
         }
 
+        .result-elapsed {
+            margin-top: 8px;
+            color: #555;
+            font-size: 0.95rem;
+        }
+
         .retry-btn {
             display: inline-block;
             padding: 12px 32px;
@@ -452,9 +477,12 @@
 
             <!-- Basic Options -->
             <div class="options-grid">
-                <div class="option-item">
-                    <input type="checkbox" id="deskew" checked>
-                    <label for="deskew">傾き補正</label>
+                <div class="option-item option-item-stacked">
+                    <div class="option-main">
+                        <input type="checkbox" id="deskew" checked>
+                        <label for="deskew">傾き補正（Deskew / 180度回転判定を含む）</label>
+                    </div>
+                    <span class="option-note">誤回転が気になる場合は OFF にしてください</span>
                 </div>
                 <div class="option-item">
                     <input type="checkbox" id="upscale" checked>
@@ -528,6 +556,7 @@
         <!-- Result Section -->
         <div class="card result-section" id="result-section">
             <div id="result-content">
+                <p class="result-elapsed" id="result-elapsed"></p>
                 <!-- Success template (hidden by default) -->
                 <div id="result-success" class="result-success" style="display: none;">
                     <div class="result-icon">✓</div>
@@ -564,6 +593,7 @@
         const resultSection = document.getElementById('result-section');
         const resultSuccess = document.getElementById('result-success');
         const resultError = document.getElementById('result-error');
+        const resultElapsed = document.getElementById('result-elapsed');
         const downloadLink = document.getElementById('download-link');
         const errorMessage = document.getElementById('error-message');
         const retryBtn = document.getElementById('retry-btn');
@@ -575,6 +605,7 @@
         let elapsedStart = null;
         let lastPercent = 0;
         let pulseTimer = null;
+        let pollInterval = null;
 
         // DPI Slider
         const dpiSlider = document.getElementById('dpi-slider');
@@ -782,10 +813,12 @@
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = protocol + '//' + location.host + '/ws/jobs/' + jobId;
 
+            stopPollingFallback();
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
                 console.log('WebSocket connected for job:', jobId);
+                syncJobState();
             };
 
             ws.onmessage = (event) => {
@@ -799,6 +832,11 @@
 
             ws.onclose = () => {
                 console.log('WebSocket closed');
+                syncJobState().finally(() => {
+                    if (currentJobId) {
+                        startPollingFallback();
+                    }
+                });
             };
 
             ws.onerror = (error) => {
@@ -806,6 +844,52 @@
                 // Fallback to polling if WebSocket fails
                 startPollingFallback();
             };
+
+            // Keep a polling safety net in case the job finishes before the
+            // WebSocket subscription receives any completion event.
+            startPollingFallback();
+        }
+
+        async function syncJobState() {
+            if (!currentJobId) return;
+
+            try {
+                const response = await fetch('/api/jobs/' + currentJobId, { cache: 'no-store' });
+                if (!response.ok) return;
+
+                const job = await response.json();
+
+                if (job.progress) {
+                    const percent = typeof job.progress.percent === 'number'
+                        ? job.progress.percent
+                        : Math.round((job.progress.current_step / Math.max(job.progress.total_steps || 1, 1)) * 100);
+                    progressFill.style.width = percent + '%';
+                    progressPercent.textContent = percent + '%';
+                    progressStep.textContent = job.progress.step_name || 'Processing...';
+                    if (job.progress.total_steps > 0) {
+                        progressStepCount.textContent = 'ステップ ' + job.progress.current_step + '/' + job.progress.total_steps;
+                    }
+                    if (percent > lastPercent) {
+                        progressFill.classList.remove('pulsing');
+                        lastPercent = percent;
+                        clearTimeout(pulseTimer);
+                        pulseTimer = setTimeout(() => progressFill.classList.add('pulsing'), 3000);
+                    }
+                }
+
+                if (job.status === 'completed') {
+                    closeWebSocket();
+                    showSuccess('/api/jobs/' + currentJobId + '/download');
+                } else if (job.status === 'failed') {
+                    closeWebSocket();
+                    showError(job.error || 'Unknown error');
+                } else if (job.status === 'cancelled') {
+                    closeWebSocket();
+                    showError('Job was cancelled');
+                }
+            } catch (error) {
+                console.error('Failed to sync job state:', error);
+            }
         }
 
         function handleWebSocketMessage(msg) {
@@ -864,6 +948,7 @@
                 ws.close();
                 ws = null;
             }
+            stopPollingFallback();
             if (elapsedTimer) {
                 clearInterval(elapsedTimer);
                 elapsedTimer = null;
@@ -873,26 +958,35 @@
 
         // Fallback polling if WebSocket connection fails
         function startPollingFallback() {
-            const pollInterval = setInterval(async () => {
+            if (pollInterval || !currentJobId) {
+                return;
+            }
+
+            pollInterval = setInterval(async () => {
                 try {
-                    const response = await fetch('/api/jobs/' + currentJobId);
+                    const response = await fetch('/api/jobs/' + currentJobId, { cache: 'no-store' });
                     const job = await response.json();
 
                     if (job.progress) {
-                        const percent = Math.round((job.progress.current_step / job.progress.total_steps) * 100);
+                        const percent = typeof job.progress.percent === 'number'
+                            ? job.progress.percent
+                            : Math.round((job.progress.current_step / Math.max(job.progress.total_steps || 1, 1)) * 100);
                         progressFill.style.width = percent + '%';
                         progressPercent.textContent = percent + '%';
                         progressStep.textContent = job.progress.step_name;
+                        if (job.progress.total_steps > 0) {
+                            progressStepCount.textContent = 'ステップ ' + job.progress.current_step + '/' + job.progress.total_steps;
+                        }
                     }
 
                     if (job.status === 'completed') {
-                        clearInterval(pollInterval);
+                        stopPollingFallback();
                         showSuccess('/api/jobs/' + currentJobId + '/download');
                     } else if (job.status === 'failed') {
-                        clearInterval(pollInterval);
+                        stopPollingFallback();
                         showError(job.error || 'Unknown error');
                     } else if (job.status === 'cancelled') {
-                        clearInterval(pollInterval);
+                        stopPollingFallback();
                         showError('Job was cancelled');
                     }
                 } catch (error) {
@@ -901,21 +995,51 @@
             }, 1000);
         }
 
+        function stopPollingFallback() {
+            if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
+        }
+
+        function formatElapsed(totalSeconds) {
+            const sec = Math.max(0, Math.floor(totalSeconds));
+            const m = Math.floor(sec / 60);
+            const s = sec % 60;
+            return m > 0
+                ? m + '分' + String(s).padStart(2, '0') + '秒'
+                : s + '秒';
+        }
+
+        function updateResultElapsed() {
+            if (!elapsedStart) {
+                resultElapsed.textContent = '';
+                return;
+            }
+
+            const sec = Math.floor((Date.now() - elapsedStart) / 1000);
+            resultElapsed.textContent = '所要時間: ' + formatElapsed(sec);
+        }
+
         function showSuccess(downloadUrl) {
+            stopPollingFallback();
             progressSection.classList.remove('active');
             resultSection.classList.add('active');
             resultSuccess.style.display = 'block';
             resultError.style.display = 'none';
+            updateResultElapsed();
             downloadLink.href = downloadUrl || '/api/jobs/' + currentJobId + '/download';
             resetFormState();
         }
 
         function showError(message) {
+            stopPollingFallback();
             progressSection.classList.remove('active');
             resultSection.classList.add('active');
             resultSuccess.style.display = 'none';
             resultError.style.display = 'block';
             errorMessage.textContent = message;
+            updateResultElapsed();
         }
 
         function resetFormState() {
@@ -931,6 +1055,7 @@
             progressStep.textContent = '準備中...';
             progressStepCount.textContent = '';
             progressElapsed.textContent = '';
+            elapsedStart = null;
             while (progressLog.firstChild) progressLog.removeChild(progressLog.firstChild);
             lastPercent = 0;
         }
@@ -942,6 +1067,7 @@
             resultSection.classList.remove('active');
             resultSuccess.style.display = 'none';
             resultError.style.display = 'none';
+            resultElapsed.textContent = '';
         }
     </script>
 </body>

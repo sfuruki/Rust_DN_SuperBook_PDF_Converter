@@ -20,13 +20,13 @@
 //! 13. PDF生成
 
 use rayon::prelude::*;
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
-use tokio::time::{Duration, Instant as TokioInstant};
 use crate::cli::ConvertArgs;
 use crate::ai_bridge::AiBridge;
 // 🚀 追加: upscale_batch メソッドを使用するためにトレイトをスコープに入れる
@@ -1276,61 +1276,70 @@ impl PdfPipeline {
                 .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?
         );
 
-        let esrgan = crate::RealEsrgan::new(bridge);
         let mut options = crate::realesrgan::RealEsrganOptions::builder().scale(2);
         if self.config.gpu {
             options = options.gpu_id(0);
         }
         let options = options.build();
 
-        let mut output_paths = Vec::with_capacity(images.len());
-        progress.on_step_progress(0, images.len());
+        let total_pages = images.len();
+        progress.on_step_progress(0, total_pages.max(1));
 
-        for (index, input_path) in images.iter().enumerate() {
-            let output_path = upscaled_dir.join(format!(
-                "{}{}x.png",
-                input_path.file_stem().unwrap_or_default().to_string_lossy(),
-                options.scale
-            ));
-
-            let upscale_future = esrgan.upscale(input_path, &output_path, &options);
-            tokio::pin!(upscale_future);
-
-            let page_number = index + 1;
-            let total_pages = images.len();
-            let heartbeat_start = TokioInstant::now();
-            let mut heartbeat = tokio::time::interval(Duration::from_secs(3));
-            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-            let upscale_result = loop {
-                tokio::select! {
-                    result = &mut upscale_future => break result,
-                    _ = heartbeat.tick() => {
-                        let elapsed_secs = heartbeat_start.elapsed().as_secs();
-                        let estimated_ticks = (elapsed_secs / 3).min(9) as usize;
-                        let synthetic_current = index.saturating_mul(10) + estimated_ticks;
-                        let synthetic_total = total_pages.saturating_mul(10).max(1);
-                        progress.on_step_progress(synthetic_current, synthetic_total);
-                        progress.on_debug(&format!(
-                            "AI Upscaling page {}/{} running for {}s",
-                            page_number,
-                            total_pages,
-                            elapsed_secs
-                        ));
-                    }
-                }
-            };
-
-            match upscale_result {
-                Ok(result) => output_paths.push(result.output_path),
-                Err(e) => {
-                    progress.on_warning(&format!("超解像失敗: {}", e));
-                    output_paths.push(input_path.clone());
-                }
-            }
-
-            progress.on_step_progress((index + 1) * 10, images.len().saturating_mul(10).max(1));
+        let configured_threads = self.config.threads.unwrap_or_else(num_cpus::get).max(1);
+        let max_parallel = if self.config.gpu {
+            configured_threads.min(2)
+        } else {
+            configured_threads.min(6)
         }
+        .max(1);
+
+        progress.on_debug(&format!(
+            "AI upscaling concurrency: {} (gpu: {})",
+            max_parallel, self.config.gpu
+        ));
+
+        let completed = AtomicUsize::new(0);
+        let indexed_results: Vec<(usize, PathBuf)> = stream::iter(images.iter().cloned().enumerate())
+            .map(|(index, input_path)| {
+                let bridge = bridge.clone();
+                let options = options.clone();
+                let output_path = upscaled_dir.join(format!(
+                    "{}{}x.png",
+                    input_path.file_stem().unwrap_or_default().to_string_lossy(),
+                    options.scale
+                ));
+                async move {
+                    let esrgan = crate::RealEsrgan::new(bridge);
+                    let result = esrgan.upscale(&input_path, &output_path, &options).await;
+                    (index, input_path, result)
+                }
+            })
+            .buffer_unordered(max_parallel)
+            .map(|(index, input_path, upscale_result)| {
+                let output_path = match upscale_result {
+                    Ok(result) => result.output_path,
+                    Err(e) => {
+                        progress.on_warning(&format!("超解像失敗: {}", e));
+                        input_path.clone()
+                    }
+                };
+
+                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                progress.on_step_progress(done, total_pages.max(1));
+                (index, output_path)
+            })
+            .collect()
+            .await;
+
+        let mut indexed_results = indexed_results;
+        indexed_results.sort_by_key(|(index, _)| *index);
+        let output_paths: Vec<PathBuf> = indexed_results
+            .into_iter()
+            .map(|(_, output_path)| output_path)
+            .collect();
+
+        // Cleanup RealESRGAN cache and free GPU memory after upscaling
+        let _ = bridge.call_cleanup(crate::ai_bridge::AiTool::RealESRGAN).await;
 
         progress.on_step_complete("超解像", &format!("{}画像", output_paths.len()));
         Ok(output_paths)
@@ -1675,7 +1684,7 @@ impl PdfPipeline {
                 .map_err(|e| PipelineError::ImageProcessingFailed(e.to_string()))?
         );
 
-        let yomitoku = crate::YomiToku::new(bridge);
+        let yomitoku = crate::YomiToku::new(bridge.clone());
         let mut ocr_opts = crate::yomitoku::YomiTokuOptions::builder();
         if self.config.gpu {
             ocr_opts = ocr_opts.use_gpu(true).gpu_id(0);
@@ -1693,6 +1702,10 @@ impl PdfPipeline {
             }
         }
         let success_count = results.iter().filter(|r| r.is_some()).count();
+
+        // Cleanup YomiToku cache and free GPU memory after OCR
+        let _ = bridge.call_cleanup(crate::ai_bridge::AiTool::YomiToku).await;
+
         progress.on_step_complete("OCR", &format!("{}/{} pages", success_count, results.len()));
         Ok(results)
     }

@@ -30,6 +30,7 @@ import json
 import os
 import sys
 import time
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -54,6 +55,56 @@ EXIT_INPUT_NOT_FOUND = 3
 EXIT_OUTPUT_ERROR = 4
 EXIT_GPU_ERROR = 5
 EXIT_OOM = 6
+
+
+# Reuse analyzer instances across requests to avoid repeated model loading.
+_ANALYZER_CACHE: Dict[str, Any] = {}
+_ANALYZER_CACHE_LOCK = threading.Lock()
+_ACTIVE_OCR_COUNT = 0
+_ACTIVE_OCR_COND = threading.Condition(threading.Lock())
+
+
+def cleanup_analyzer(wait_timeout: float = 3.0) -> bool:
+    """Clean up cached analyzers and free GPU memory.
+
+    Returns True when cleanup was executed, False when skipped because
+    active OCR requests are still running.
+    """
+    global _ANALYZER_CACHE
+    deadline = time.time() + wait_timeout
+    with _ACTIVE_OCR_COND:
+        while _ACTIVE_OCR_COUNT > 0 and time.time() < deadline:
+            _ACTIVE_OCR_COND.wait(timeout=0.2)
+        if _ACTIVE_OCR_COUNT > 0:
+            print(
+                f"Cleanup skipped: {_ACTIVE_OCR_COUNT} active OCR request(s)",
+                file=sys.stderr,
+            )
+            return False
+
+    with _ANALYZER_CACHE_LOCK:
+        for device in list(_ANALYZER_CACHE.keys()):
+            del _ANALYZER_CACHE[device]
+            print(f"ANALYZER cleaned: {device}", file=sys.stderr)
+        
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("GPU memory cache cleared", file=sys.stderr)
+
+    return True
+
+
+def get_or_create_analyzer(device: str):
+    """Return cached DocumentAnalyzer for a device, creating it if needed."""
+    with _ANALYZER_CACHE_LOCK:
+        analyzer = _ANALYZER_CACHE.get(device)
+        if analyzer is not None:
+            print(f"ANALYZER_CACHE hit: {device}", file=sys.stderr)
+            return analyzer
+        print(f"ANALYZER_CACHE miss: {device}", file=sys.stderr)
+        analyzer = DocumentAnalyzer(device=device)
+        _ANALYZER_CACHE[device] = analyzer
+        return analyzer
 
 
 def detect_text_direction(blocks: List[Dict]) -> str:
@@ -217,7 +268,11 @@ def process_image(
     confidence_threshold: float = 0.5,
 ) -> Dict[str, Any]:
     """Process a single image with YomiToku OCR."""
+    global _ACTIVE_OCR_COUNT
     start_time = time.time()
+
+    with _ACTIVE_OCR_COND:
+        _ACTIVE_OCR_COUNT += 1
 
     if not input_path.exists():
         return {"error": "Input not found", "exit_code": EXIT_INPUT_NOT_FOUND}
@@ -235,8 +290,7 @@ def process_image(
         else:
             device = "cpu"
 
-        # Initialize analyzer
-        analyzer = DocumentAnalyzer(device=device)
+        analyzer = get_or_create_analyzer(device)
 
         # Load and process image
         # load_image returns a list of numpy arrays (for batch processing)
@@ -351,6 +405,10 @@ def process_image(
         return {"error": str(e), "exit_code": EXIT_ERROR}
     except Exception as e:
         return {"error": str(e), "exit_code": EXIT_ERROR}
+    finally:
+        with _ACTIVE_OCR_COND:
+            _ACTIVE_OCR_COUNT = max(0, _ACTIVE_OCR_COUNT - 1)
+            _ACTIVE_OCR_COND.notify_all()
 
 
 def format_output(result: Dict[str, Any], output_format: str) -> str:

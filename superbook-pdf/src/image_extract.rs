@@ -33,6 +33,7 @@
 //! // );
 //! ```
 
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
@@ -734,6 +735,25 @@ impl LopdfExtractor {
 pub struct PopplerExtractor;
 
 impl PopplerExtractor {
+    fn build_page_ranges(page_count: usize, workers: usize) -> Vec<(usize, usize)> {
+        if page_count == 0 {
+            return Vec::new();
+        }
+
+        let worker_count = workers.max(1).min(page_count);
+        let chunk_size = page_count.div_ceil(worker_count);
+
+        let mut ranges = Vec::with_capacity(worker_count);
+        let mut start = 1usize;
+        while start <= page_count {
+            let end = (start + chunk_size - 1).min(page_count);
+            ranges.push((start, end));
+            start = end + 1;
+        }
+
+        ranges
+    }
+
     /// Extract a single page from PDF using pdftoppm
     pub fn extract_page(
         pdf_path: &Path,
@@ -849,17 +869,166 @@ impl PopplerExtractor {
         // Get page count using pdfinfo
         let page_count = Self::get_page_count(pdf_path)?;
 
-        // Extract pages
-        let extension = options.format.extension();
-        let mut results = Vec::with_capacity(page_count);
+        if page_count == 0 {
+            return Ok(Vec::new());
+        }
 
-        for i in 0..page_count {
+        // Split page ranges and run multiple pdftoppm processes in parallel.
+        let extension = options.format.extension();
+        let actual_ext = match options.format {
+            ImageFormat::Png | ImageFormat::Bmp => "png",
+            ImageFormat::Jpeg { .. } => "jpg",
+            ImageFormat::Tiff => "tif",
+        };
+        let ranges = Self::build_page_ranges(page_count, options.parallel);
+
+        let parallel_results: Vec<Result<Vec<(usize, PathBuf)>>> = ranges
+            .par_iter()
+            .enumerate()
+            .map(|(chunk_idx, (start_page, end_page))| {
+                let chunk_prefix = output_dir.join(format!("pdftoppm_part_{}", chunk_idx));
+                let chunk_prefix_str = chunk_prefix.to_string_lossy().to_string();
+
+                // Remove stale files for this chunk prefix to avoid count mismatch.
+                if let Ok(entries) = std::fs::read_dir(output_dir) {
+                    let expected_head = format!(
+                        "{}-",
+                        chunk_prefix
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or_default()
+                    );
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) != Some(actual_ext) {
+                            continue;
+                        }
+                        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                            if name.starts_with(&expected_head) {
+                                let _ = std::fs::remove_file(path);
+                            }
+                        }
+                    }
+                }
+
+                let mut cmd = Command::new("pdftoppm");
+                cmd.arg("-r").arg(options.dpi.to_string());
+                cmd.arg("-f").arg(start_page.to_string());
+                cmd.arg("-l").arg(end_page.to_string());
+
+                match options.format {
+                    ImageFormat::Png | ImageFormat::Bmp => {
+                        cmd.arg("-png");
+                    }
+                    ImageFormat::Jpeg { quality } => {
+                        cmd.arg("-jpeg");
+                        cmd.arg("-jpegopt").arg(format!("quality={}", quality));
+                    }
+                    ImageFormat::Tiff => {
+                        cmd.arg("-tiff");
+                    }
+                }
+
+                if matches!(options.colorspace, ColorSpace::Grayscale) {
+                    cmd.arg("-gray");
+                }
+
+                cmd.arg(pdf_path);
+                cmd.arg(&chunk_prefix_str);
+
+                let output = cmd.output()?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(ExtractError::ExternalToolError(format!(
+                        "pdftoppm failed for pages {}-{}: {}",
+                        start_page, end_page, stderr
+                    )));
+                }
+
+                let prefix_name = chunk_prefix
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| ExtractError::ExtractionFailed {
+                        page: 0,
+                        reason: "Invalid batch output prefix".to_string(),
+                    })?;
+                let expected_head = format!("{}-", prefix_name);
+
+                let mut generated_chunk: Vec<(usize, PathBuf)> = std::fs::read_dir(output_dir)?
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().and_then(|s| s.to_str()) == Some(actual_ext))
+                    .filter_map(|path| {
+                        let file_name = path.file_name()?.to_str()?;
+                        if !file_name.starts_with(&expected_head) {
+                            return None;
+                        }
+                        let stem = path.file_stem()?.to_str()?;
+                        let page_num = stem.strip_prefix(&expected_head)?.parse::<usize>().ok()?;
+                        Some((page_num, path))
+                    })
+                    .collect();
+
+                generated_chunk.sort_by_key(|(num, _)| *num);
+                let expected_count = end_page - start_page + 1;
+                if generated_chunk.len() != expected_count {
+                    return Err(ExtractError::ExtractionFailed {
+                        page: start_page.saturating_sub(1),
+                        reason: format!(
+                            "pdftoppm output count mismatch for pages {}-{}: expected {}, got {}",
+                            start_page,
+                            end_page,
+                            expected_count,
+                            generated_chunk.len()
+                        ),
+                    });
+                }
+
+                Ok(generated_chunk)
+            })
+            .collect();
+
+        let mut generated: Vec<(usize, PathBuf)> = Vec::with_capacity(page_count);
+        for chunk_result in parallel_results {
+            let mut chunk = chunk_result?;
+            generated.append(&mut chunk);
+        }
+
+        generated.sort_by_key(|(num, _)| *num);
+
+        if generated.len() != page_count {
+            return Err(ExtractError::ExtractionFailed {
+                page: 0,
+                reason: format!(
+                    "pdftoppm output count mismatch: expected {}, got {}",
+                    page_count,
+                    generated.len()
+                ),
+            });
+        }
+
+        let mut results = Vec::with_capacity(page_count);
+        for (i, (_, src_path)) in generated.into_iter().enumerate() {
             let output_path = output_dir.join(format!("page_{:05}.{}", i, extension));
 
-            let result = Self::extract_page(pdf_path, i, &output_path, options)?;
-            results.push(result);
+            if output_path.exists() {
+                std::fs::remove_file(&output_path)?;
+            }
+            std::fs::rename(&src_path, &output_path)?;
 
-            // Call progress callback if provided
+            let img = image::open(&output_path).map_err(|e| ExtractError::ExtractionFailed {
+                page: i,
+                reason: e.to_string(),
+            })?;
+
+            results.push(ExtractedPage {
+                page_index: i,
+                path: output_path,
+                width: img.width(),
+                height: img.height(),
+                format: options.format,
+            });
+
             if let Some(ref callback) = options.progress_callback {
                 callback(i + 1, page_count);
             }
