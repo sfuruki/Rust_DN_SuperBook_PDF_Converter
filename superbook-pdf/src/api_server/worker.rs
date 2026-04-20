@@ -183,17 +183,12 @@ fn output_name_from_input_filename(input_filename: &str) -> String {
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("output");
-    format!("{}_converted.pdf", stem)
+    format!("{}_superbook.pdf", stem)
 }
 
-fn preferred_output_path(base_output_path: &std::path::Path, input_filename: &str, job_id: Uuid) -> PathBuf {
-    let output_dir = base_output_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-
+fn preferred_output_path(output_dir: &std::path::Path, input_filename: &str, job_id: Uuid) -> PathBuf {
     let preferred = output_dir.join(output_name_from_input_filename(input_filename));
-    if preferred == base_output_path || !preferred.exists() {
+    if !preferred.exists() {
         return preferred;
     }
 
@@ -204,7 +199,7 @@ fn preferred_output_path(base_output_path: &std::path::Path, input_filename: &st
         .unwrap_or("output");
     let job_id_str = job_id.to_string();
     let short_id = &job_id_str[..8];
-    output_dir.join(format!("{}_{}_converted.pdf", stem, short_id))
+    output_dir.join(format!("{}_{}_superbook.pdf", stem, short_id))
 }
 
 /// Background worker for job processing
@@ -212,6 +207,7 @@ pub struct JobWorker {
     queue: JobQueue,
     receiver: mpsc::Receiver<WorkerMessage>,
     work_dir: PathBuf,
+    output_dir: PathBuf,
     broadcaster: Arc<WsBroadcaster>,
 }
 
@@ -221,12 +217,14 @@ impl JobWorker {
         queue: JobQueue,
         receiver: mpsc::Receiver<WorkerMessage>,
         work_dir: PathBuf,
+        output_dir: PathBuf,
         broadcaster: Arc<WsBroadcaster>,
     ) -> Self {
         Self {
             queue,
             receiver,
             work_dir,
+            output_dir,
             broadcaster,
         }
     }
@@ -284,9 +282,20 @@ impl JobWorker {
             }
         }
 
-        // Create output directory
-        let output_dir = self.work_dir.join("output");
-        if let Err(e) = std::fs::create_dir_all(&output_dir) {
+        // Use work_dir for intermediate files.
+        let processing_dir = self.work_dir.clone();
+        if let Err(e) = std::fs::create_dir_all(&processing_dir) {
+            let error_msg = format!("Failed to create working directory: {}", e);
+            self.queue.update(job_id, |job| {
+                job.fail(error_msg.clone());
+            });
+            self.broadcaster.broadcast_error(job_id, &error_msg).await;
+            return;
+        }
+
+        // Keep output_dir for final artifacts only.
+        let final_output_dir = self.output_dir.clone();
+        if let Err(e) = std::fs::create_dir_all(&final_output_dir) {
             let error_msg = format!("Failed to create output directory: {}", e);
             self.queue.update(job_id, |job| {
                 job.fail(error_msg.clone());
@@ -303,25 +312,31 @@ impl JobWorker {
         let progress = WebProgressCallback::new(job_id, self.queue.clone(), self.broadcaster.clone());
 
         // Run pipeline directly (it handles its own async/blocking balance)
-        let result = pipeline.process_with_progress(&input_path, &output_dir, &progress).await;
+        let result = pipeline
+            .process_with_progress(&input_path, &processing_dir, &progress)
+            .await;
 
         match result {
             Ok(pipeline_result) => {
                 // Pipeline succeeded
                 let final_output_path = {
-                    let preferred = preferred_output_path(
-                        &pipeline_result.output_path,
-                        &input_filename,
-                        job_id,
-                    );
+                    let preferred = preferred_output_path(&final_output_dir, &input_filename, job_id);
                     if preferred != pipeline_result.output_path {
-                        if let Err(e) = std::fs::rename(&pipeline_result.output_path, &preferred) {
-                            let error_msg = format!("Failed to finalize output filename: {}", e);
-                            self.queue.update(job_id, |job| {
-                                job.fail(error_msg.clone());
-                            });
-                            self.broadcaster.broadcast_error(job_id, &error_msg).await;
-                            return;
+                        if let Err(rename_err) = std::fs::rename(&pipeline_result.output_path, &preferred) {
+                            // Handle cross-filesystem moves by copying.
+                            if let Err(copy_err) = std::fs::copy(&pipeline_result.output_path, &preferred)
+                            {
+                                let error_msg = format!(
+                                    "Failed to finalize output filename: rename error: {}, copy error: {}",
+                                    rename_err, copy_err
+                                );
+                                self.queue.update(job_id, |job| {
+                                    job.fail(error_msg.clone());
+                                });
+                                self.broadcaster.broadcast_error(job_id, &error_msg).await;
+                                return;
+                            }
+                            std::fs::remove_file(&pipeline_result.output_path).ok();
                         }
                     }
                     preferred
@@ -357,9 +372,9 @@ mod tests {
     fn test_output_name_from_input_filename() {
         assert_eq!(
             output_name_from_input_filename("sample-book.pdf"),
-            "sample-book_converted.pdf"
+            "sample-book_superbook.pdf"
         );
-        assert_eq!(output_name_from_input_filename("noext"), "noext_converted.pdf");
+        assert_eq!(output_name_from_input_filename("noext"), "noext_superbook.pdf");
     }
 }
 
@@ -367,6 +382,7 @@ mod tests {
 pub struct WorkerPool {
     sender: mpsc::Sender<WorkerMessage>,
     work_dir: PathBuf,
+    output_dir: PathBuf,
     worker_count: usize,
 }
 
@@ -375,6 +391,7 @@ impl WorkerPool {
     pub fn new(
         queue: JobQueue,
         work_dir: PathBuf,
+        output_dir: PathBuf,
         worker_count: usize,
         broadcaster: Arc<WsBroadcaster>,
     ) -> Self {
@@ -386,6 +403,7 @@ impl WorkerPool {
         for _ in 0..worker_count {
             let queue = queue.clone();
             let work_dir = work_dir.clone();
+            let output_dir = output_dir.clone();
             let receiver = receiver.clone();
             let broadcaster = broadcaster.clone();
 
@@ -408,6 +426,7 @@ impl WorkerPool {
                                 queue.clone(),
                                 dummy_rx,
                                 work_dir.clone(),
+                                output_dir.clone(),
                                 broadcaster.clone(),
                             );
                             worker.process_job(job_id, input_path, options).await;
@@ -423,6 +442,7 @@ impl WorkerPool {
         Self {
             sender,
             work_dir,
+            output_dir,
             worker_count,
         }
     }
@@ -447,6 +467,11 @@ impl WorkerPool {
     /// Get the work directory
     pub fn work_dir(&self) -> &PathBuf {
         &self.work_dir
+    }
+
+    /// Get the output directory
+    pub fn output_dir(&self) -> &PathBuf {
+        &self.output_dir
     }
 
     /// Shutdown all workers
@@ -481,8 +506,9 @@ mod tests {
     async fn test_worker_pool_creation() {
         let queue = JobQueue::new();
         let work_dir = std::env::temp_dir();
+        let output_dir = work_dir.join("output");
         let broadcaster = Arc::new(WsBroadcaster::new());
-        let _pool = WorkerPool::new(queue, work_dir, 2, broadcaster);
+        let _pool = WorkerPool::new(queue, work_dir, output_dir, 2, broadcaster);
         // Pool created successfully
     }
 
@@ -520,10 +546,11 @@ mod tests {
     async fn test_job_processing_with_invalid_pdf() {
         let queue = JobQueue::new();
         let work_dir = std::env::temp_dir().join("superbook_test_worker");
+        let output_dir = work_dir.join("output");
         std::fs::create_dir_all(&work_dir).ok();
 
         let broadcaster = Arc::new(WsBroadcaster::new());
-        let pool = WorkerPool::new(queue.clone(), work_dir.clone(), 1, broadcaster);
+        let pool = WorkerPool::new(queue.clone(), work_dir.clone(), output_dir, 1, broadcaster);
 
         // Create a job
         let options = ConvertOptions::default();

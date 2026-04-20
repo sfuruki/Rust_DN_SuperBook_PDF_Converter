@@ -397,9 +397,13 @@ pub struct ConvertArgs {
     /// Input PDF file or directory
     pub input: PathBuf,
 
-    /// Output directory
-    #[arg(short = 'o', long = "output", default_value = "./output")]
-    pub output: PathBuf,
+    /// Output directory (default: $SUPERBOOK_OUTPUT_DIR or ./output)
+    #[arg(short = 'o', long = "output")]
+    pub output: Option<PathBuf>,
+
+    /// Work directory for intermediate files (default: $SUPERBOOK_WORK_DIR or alongside output)
+    #[arg(long = "work-dir")]
+    pub work_dir: Option<PathBuf>,
 
     /// Configuration file path (TOML format)
     #[arg(short = 'c', long)]

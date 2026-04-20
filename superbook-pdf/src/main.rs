@@ -171,7 +171,26 @@ async fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error
 
     // CLI引数による上書き設定の適用 [3, 5]
     let cli_overrides = create_cli_overrides(args);
-    let pipeline_config = file_config.merge_with_cli(&cli_overrides);
+    let mut pipeline_config = file_config.merge_with_cli(&cli_overrides);
+
+    // -o 未指定時は SUPERBOOK_OUTPUT_DIR 環境変数、なければ ./output
+    let output_dir: PathBuf = args.output.clone().unwrap_or_else(|| {
+        std::env::var("SUPERBOOK_OUTPUT_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("./output"))
+    });
+
+    // --work-dir 未指定時は SUPERBOOK_WORK_DIR 環境変数
+    let work_dir: Option<PathBuf> = args.work_dir.clone().or_else(|| {
+        std::env::var("SUPERBOOK_WORK_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+    });
+    pipeline_config.override_work_dir = work_dir.clone();
+
     let pipeline = PdfPipeline::new(pipeline_config);
 
     // ドライラン（実行計画の表示）モード [3, 4]
@@ -181,7 +200,10 @@ async fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error
     }
 
     // 出力ディレクトリの作成
-    std::fs::create_dir_all(&args.output)?;
+    std::fs::create_dir_all(&output_dir)?;
+    if let Some(wd) = &work_dir {
+        std::fs::create_dir_all(wd)?;
+    };
     let verbose = args.verbose > 0;
     let progress = VerboseProgress::new(args.verbose.into());
     let options_json = pipeline.config().to_json();
@@ -193,7 +215,7 @@ async fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error
 
     // 非同期ループ内で実行
     for (idx, pdf_path) in pdf_files.iter().enumerate() {
-            let output_pdf = pipeline.get_output_path(pdf_path, &args.output);
+            let output_pdf = pipeline.get_output_path(pdf_path, &output_dir);
 
             // キャッシュによるスキップ判定 [3]
             if args.skip_existing && !args.force {
@@ -236,7 +258,7 @@ async fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error
 
             // パイプライン処理の実行 [3, 6]
             // 注: 内部で HTTP リクエストが発生するため、この block_on 内で実行される必要があります
-            match pipeline.process_with_progress(pdf_path, &args.output, &progress).await {
+            match pipeline.process_with_progress(pdf_path, &output_dir, &progress).await {
                 Ok(result) => {
                     ok_count += 1;
                     // 処理成功後のキャッシュ保存 [3]
@@ -450,7 +472,7 @@ fn print_execution_plan(
     println!("=== Dry Run - Execution Plan ===");
     println!();
     println!("Input: {}", args.input.display());
-    println!("Output: {}", args.output.display());
+    println!("Output: {}", args.output.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "(from env/default)".to_string()));
     println!("Files to process: {}", pdf_files.len());
     println!();
     println!("Pipeline Configuration:");

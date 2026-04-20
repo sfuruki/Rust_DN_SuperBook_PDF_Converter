@@ -28,7 +28,7 @@ use super::websocket::{ws_job_handler, WsBroadcaster};
 use super::worker::WorkerPool;
 
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 
 /// Application state shared across handlers
 pub struct AppState {
@@ -36,7 +36,7 @@ pub struct AppState {
     pub batch_queue: BatchQueue,
     pub version: String,
     pub worker_pool: WorkerPool,
-    pub upload_dir: PathBuf,
+    pub output_dir: PathBuf,
     pub broadcaster: Arc<WsBroadcaster>,
     pub metrics: Arc<MetricsCollector>,
     pub rate_limiter: Arc<RateLimiter>,
@@ -96,8 +96,11 @@ impl AppState {
     ) -> Self {
         let queue = JobQueue::new();
         let batch_queue = BatchQueue::new(queue.clone());
-        let upload_dir = work_dir.join("uploads");
-        std::fs::create_dir_all(&upload_dir).ok();
+        let output_dir = match std::env::var("SUPERBOOK_OUTPUT_DIR") {
+            Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
+            _ => work_dir.join("output"),
+        };
+        std::fs::create_dir_all(&output_dir).ok();
 
         let broadcaster = Arc::new(WsBroadcaster::new());
         let metrics = Arc::new(MetricsCollector::new());
@@ -106,6 +109,7 @@ impl AppState {
         let worker_pool = WorkerPool::new(
             queue.clone(),
             work_dir.clone(),
+            output_dir.clone(),
             worker_count,
             broadcaster.clone(),
         );
@@ -129,7 +133,7 @@ impl AppState {
             batch_queue,
             version: env!("CARGO_PKG_VERSION").to_string(),
             worker_pool,
-            upload_dir,
+            output_dir,
             broadcaster,
             metrics,
             rate_limiter,
@@ -138,6 +142,22 @@ impl AppState {
             persistence_config,
         }
     }
+}
+
+fn work_dir_for_job(base_work_dir: &StdPath, job_id: Uuid, filename: &str) -> PathBuf {
+    let stem = StdPath::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("upload");
+    base_work_dir.join(format!("work_{}_{}", job_id, stem))
+}
+
+fn input_path_for_job(base_work_dir: &StdPath, job_id: Uuid, filename: &str) -> PathBuf {
+    let job_work_dir = work_dir_for_job(base_work_dir, job_id, filename);
+    job_work_dir
+        .join("input")
+        .join(format!("{}_{}", job_id, filename))
 }
 
 /// Build the API router
@@ -574,14 +594,14 @@ async fn retry_job(
     state.queue.submit(new_job);
 
     // Try to find the original input file and resubmit
-    let input_path = state
-        .upload_dir
-        .join(format!("{}_{}", id, job.input_filename));
+    let input_path = input_path_for_job(state.worker_pool.work_dir(), id, &job.input_filename);
     if input_path.exists() {
         // Copy to new job path
-        let new_input_path = state
-            .upload_dir
-            .join(format!("{}_{}", new_job_id, job.input_filename));
+        let new_input_path =
+            input_path_for_job(state.worker_pool.work_dir(), new_job_id, &job.input_filename);
+        if let Some(parent) = new_input_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
         if std::fs::copy(&input_path, &new_input_path).is_ok() {
             if let Err(e) = state
                 .worker_pool
@@ -707,7 +727,11 @@ async fn upload_and_convert(
     let created_at = job.created_at.to_rfc3339();
 
     // Save uploaded file
-    let input_path = state.upload_dir.join(format!("{}_{}", job_id, filename));
+    let input_path = input_path_for_job(state.worker_pool.work_dir(), job_id, &filename);
+    if let Some(parent) = input_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AppError::Internal(format!("Failed to create upload directory: {}", e)))?;
+    }
     std::fs::write(&input_path, &file_data)
         .map_err(|e| AppError::Internal(format!("Failed to save uploaded file: {}", e)))?;
 
@@ -948,7 +972,11 @@ async fn create_batch(
         let job_id = job.id;
 
         // Save uploaded file
-        let input_path = state.upload_dir.join(format!("{}_{}", job_id, filename));
+        let input_path = input_path_for_job(state.worker_pool.work_dir(), job_id, &filename);
+        if let Some(parent) = input_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| AppError::Internal(format!("Failed to create upload directory: {}", e)))?;
+        }
         std::fs::write(&input_path, &data)
             .map_err(|e| AppError::Internal(format!("Failed to save uploaded file: {}", e)))?;
 

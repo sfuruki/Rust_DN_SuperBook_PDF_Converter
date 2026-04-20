@@ -52,6 +52,7 @@ services:
     environment:
       - RUST_LOG=info
       - SUPERBOOK_WORK_DIR=/data/work
+      - SUPERBOOK_OUTPUT_DIR=/data/output
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # マイクロサービス間の通信用URL [構築方針]

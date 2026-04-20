@@ -271,6 +271,11 @@ pub struct PipelineConfig {
     /// Assume Japanese book (enables R2L page progression even for horizontal text)
     #[serde(default = "default_true")]
     pub assume_japanese_book: bool,
+    /// Override work directory for intermediate files (CLI mode).
+    /// When set, intermediates go to `<override_work_dir>/.work_<stem>/` instead of
+    /// alongside the output directory.
+    #[serde(skip)]
+    pub override_work_dir: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -319,6 +324,7 @@ impl Default for PipelineConfig {
             deblur: false,
             deblur_algorithm: default_deblur_algorithm(),
             assume_japanese_book: true,
+            override_work_dir: None,
         }
     }
 }
@@ -350,6 +356,7 @@ impl PipelineConfig {
             deblur: args.deblur,
             deblur_algorithm: format!("{:?}", args.deblur_algorithm).to_lowercase(),
             assume_japanese_book: true,
+            override_work_dir: args.work_dir.clone(),
         }
     }
 
@@ -492,12 +499,38 @@ impl PdfPipeline {
     /// Get the output PDF path for a given input PDF
     pub fn get_output_path(&self, input: &Path, output_dir: &Path) -> PathBuf {
         let pdf_name = input.file_stem().unwrap_or_default().to_string_lossy();
-        output_dir.join(format!("{}_converted.pdf", pdf_name))
+        output_dir.join(format!("{}_superbook.pdf", pdf_name))
     }
 
     /// Get the working directory for a PDF
     pub fn get_work_dir(&self, input: &Path, output_dir: &Path) -> PathBuf {
+        // Web API uploads are saved under: /data/work/work_<job>_<stem>/input/<job>_<stem>.pdf
+        // In that case, use the enclosing work_<job>_<stem> directory directly to avoid nesting.
+        if let Some(input_parent) = input.parent() {
+            let parent_is_input = input_parent
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == "input")
+                .unwrap_or(false);
+            if parent_is_input {
+                if let Some(job_work_dir) = input_parent.parent() {
+                    let is_web_job_work_dir = job_work_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with("work_"))
+                        .unwrap_or(false);
+                    if is_web_job_work_dir {
+                        return job_work_dir.to_path_buf();
+                    }
+                }
+            }
+        }
+
         let pdf_name = input.file_stem().unwrap_or_default().to_string_lossy();
+        // CLI mode: if override_work_dir is set, put intermediates there (separate from output)
+        if let Some(wd) = &self.config.override_work_dir {
+            return wd.join(format!(".work_{}", pdf_name));
+        }
         output_dir.join(format!(".work_{}", pdf_name))
     }
 
@@ -1985,7 +2018,7 @@ mod tests {
 
         let output_path = pipeline.get_output_path(input, output_dir);
 
-        assert_eq!(output_path, PathBuf::from("/output/document_converted.pdf"));
+        assert_eq!(output_path, PathBuf::from("/output/document_superbook.pdf"));
     }
 
     #[test]
@@ -1998,7 +2031,7 @@ mod tests {
 
         let output_path = pipeline.get_output_path(input, output_dir);
 
-        assert_eq!(output_path, PathBuf::from("/output/document_converted.pdf"));
+        assert_eq!(output_path, PathBuf::from("/output/document_superbook.pdf"));
     }
 
     #[tokio::test]
