@@ -3,15 +3,19 @@
 //! Handles the actual PDF conversion in a background task.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::RwLock;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::job::{ConvertOptions, JobQueue, JobStatus, Progress};
+use crate::config::PipelineTomlConfig;
+use super::job::{JobQueue, JobStatus, Progress};
+use super::metrics::MetricsCollector;
 use super::websocket::WsBroadcaster;
-use crate::pipeline::{PdfPipeline, PipelineConfig, ProgressCallback};
+use crate::{
+    build_standard_pipeline_runner, PdfWriterOptions, PipelineRunnerConfig, PrintPdfWriter,
+    ProgressEvent, RetryConfig,
+};
 
 /// Worker message types
 #[derive(Debug)]
@@ -20,161 +24,35 @@ pub enum WorkerMessage {
     Process {
         job_id: Uuid,
         input_path: PathBuf,
-        options: ConvertOptions,
+        effective_config: PipelineTomlConfig,
     },
     /// Shutdown the worker
     Shutdown,
 }
 
-/// Progress callback that updates the job queue
-struct WebProgressCallback {
-    job_id: Uuid,
-    queue: JobQueue,
-    broadcaster: Arc<WsBroadcaster>,
-    current_step: AtomicU32,
-    total_steps: AtomicU32,
-    step_progress: AtomicUsize,
-    step_total: AtomicUsize,
-    step_name: RwLock<String>,
-}
-
-impl WebProgressCallback {
-    fn new(job_id: Uuid, queue: JobQueue, broadcaster: Arc<WsBroadcaster>) -> Self {
-        Self {
-            job_id,
-            queue,
-            broadcaster,
-            current_step: AtomicU32::new(1),
-            total_steps: AtomicU32::new(13),
-            step_progress: AtomicUsize::new(0),
-            step_total: AtomicUsize::new(0),
-            step_name: RwLock::new("Starting".to_string()),
-        }
-    }
-
-    fn build_progress(
-        &self,
-        current_step: u32,
-        step_name: String,
-        item_current: usize,
-        item_total: usize,
-    ) -> Progress {
-        let total_steps = self.total_steps.load(Ordering::Relaxed);
-        let percent = if total_steps == 0 {
-            0
-        } else if item_total > 0 {
-            let fraction = item_current as f32 / item_total as f32;
-            let overall = ((current_step.saturating_sub(1)) as f32 + fraction) / total_steps as f32;
-            (overall.clamp(0.0, 1.0) * 100.0) as u8
-        } else {
-            (((current_step as f32) / total_steps as f32) * 100.0) as u8
-        };
-
-        Progress {
-            current_step,
-            total_steps,
-            step_name,
-            percent,
-        }
-    }
-
-    fn publish_progress(&self, progress: Progress) {
-        self.queue.update(self.job_id, |job| {
-            job.update_progress(progress.clone());
-        });
-
-        let broadcaster = self.broadcaster.clone();
-        let job_id = self.job_id;
-        let current_step = progress.current_step;
-        let total_steps = progress.total_steps;
-        let step_name = progress.step_name.clone();
-        let percent = progress.percent;
-
-        tokio::spawn(async move {
-            broadcaster
-                .broadcast_progress_precise(job_id, current_step, total_steps, &step_name, percent)
-                .await;
-        });
-    }
-
-    fn broadcast_log(&self, message: &str) {
-        let broadcaster = self.broadcaster.clone();
-        let job_id = self.job_id;
-        let msg = message.to_string();
-        tokio::spawn(async move {
-            broadcaster.broadcast_log(job_id, &msg).await;
-        });
+fn stage_to_step(stage: &str) -> (u32, &'static str) {
+    match stage {
+        "load" => (2, "Load"),
+        "deskew" => (3, "Deskew"),
+        "color" => (4, "Color"),
+        "upscale" => (5, "Upscale"),
+        "margin" => (6, "Margin"),
+        "normalize" => (7, "Normalize"),
+        "page_number" => (8, "PageNumber"),
+        "ocr" => (9, "OCR"),
+        "save" => (10, "Save"),
+        "validation" => (11, "Validation"),
+        "cleanup" => (12, "Cleanup"),
+        "done" => (13, "Finalize"),
+        _ => (1, "Starting"),
     }
 }
 
-impl ProgressCallback for WebProgressCallback {
-    fn on_step_start(&self, step: &str) {
-        let current = self.current_step.fetch_add(1, Ordering::Relaxed);
-        self.step_progress.store(0, Ordering::Relaxed);
-        self.step_total.store(0, Ordering::Relaxed);
-        if let Ok(mut step_name) = self.step_name.write() {
-            *step_name = step.to_string();
-        }
-
-        let progress = self.build_progress(current, step.to_string(), 0, 0);
-        self.publish_progress(progress);
-    }
-
-    fn on_step_progress(&self, current: usize, total: usize) {
-        self.step_progress.store(current, Ordering::Relaxed);
-        self.step_total.store(total, Ordering::Relaxed);
-
-        let active_step = self.current_step.load(Ordering::Relaxed).saturating_sub(1);
-        let base_name = self
-            .step_name
-            .read()
-            .map(|name| name.clone())
-            .unwrap_or_else(|_| "Processing".to_string());
-        let display_name = if total > 0 {
-            format!("{} ({}/{})", base_name, current, total)
-        } else {
-            base_name
-        };
-        let progress = self.build_progress(active_step, display_name, current, total);
-        self.publish_progress(progress);
-    }
-
-    fn on_step_complete(&self, step: &str, message: &str) {
-        let log_msg = if message.is_empty() {
-            format!("✓ {}", step)
-        } else {
-            format!("✓ {} ({})", step, message)
-        };
-        self.broadcast_log(&log_msg);
-    }
-
-    fn on_debug(&self, message: &str) {
-        self.broadcast_log(message);
-    }
-}
-
-/// Convert web ConvertOptions to pipeline PipelineConfig
-fn to_pipeline_config(options: &ConvertOptions) -> PipelineConfig {
-    let advanced = options.advanced;
-    PipelineConfig {
-        dpi: options.dpi,
-        deskew: options.deskew,
-        margin_trim: 0.7,
-        upscale: options.upscale,
-        gpu: true,
-        internal_resolution: advanced,
-        color_correction: advanced,
-        offset_alignment: advanced,
-        output_height: 3508,
-        ocr: options.ocr,
-        max_pages: None,
-        save_debug: false,
-        jpeg_quality: 90,
-        threads: None,
-        max_memory_mb: 0,
-        chunk_size: 0,
-        ..PipelineConfig::default()
-    }
+struct ProgressDispatch {
+    current_step: u32,
+    total_steps: u32,
+    step_name: String,
+    percent: u8,
 }
 
 fn output_name_from_input_filename(input_filename: &str) -> String {
@@ -213,6 +91,7 @@ pub struct JobWorker {
     work_dir: PathBuf,
     output_dir: PathBuf,
     broadcaster: Arc<WsBroadcaster>,
+    metrics: Arc<MetricsCollector>,
 }
 
 impl JobWorker {
@@ -223,6 +102,7 @@ impl JobWorker {
         work_dir: PathBuf,
         output_dir: PathBuf,
         broadcaster: Arc<WsBroadcaster>,
+        metrics: Arc<MetricsCollector>,
     ) -> Self {
         Self {
             queue,
@@ -230,6 +110,7 @@ impl JobWorker {
             work_dir,
             output_dir,
             broadcaster,
+            metrics,
         }
     }
 
@@ -240,9 +121,10 @@ impl JobWorker {
                 WorkerMessage::Process {
                     job_id,
                     input_path,
-                    options,
+                    effective_config,
                 } => {
-                    self.process_job(job_id, input_path, options).await;
+                    self.process_job(job_id, input_path, effective_config)
+                        .await;
                 }
                 WorkerMessage::Shutdown => {
                     break;
@@ -252,7 +134,12 @@ impl JobWorker {
     }
 
     /// Process a single job with actual pipeline
-    pub async fn process_job(&self, job_id: Uuid, input_path: PathBuf, options: ConvertOptions) {
+    pub async fn process_job(
+        &self,
+        job_id: Uuid,
+        input_path: PathBuf,
+        config: PipelineTomlConfig,
+    ) {
         let input_filename = self
             .queue
             .get(job_id)
@@ -265,34 +152,44 @@ impl JobWorker {
                     .to_string()
             });
 
-        // Mark job as processing
-        self.queue.update(job_id, |job| {
-            job.start();
-            job.update_progress(Progress::new(1, 13, "Starting"));
-        });
+        const TOTAL_STEPS: u32 = 13;
 
-        // Broadcast status change via WebSocket
-        self.broadcaster
-            .broadcast_status_change(job_id, JobStatus::Queued, JobStatus::Processing)
-            .await;
-        self.broadcaster
-            .broadcast_progress(job_id, 1, 13, "Starting")
-            .await;
-
-        // Check if job was cancelled
+        // Check if job was cancelled before moving it to processing.
         if let Some(job) = self.queue.get(job_id) {
             if job.status == JobStatus::Cancelled {
                 return;
             }
         }
 
-        // Use work_dir for intermediate files.
-        let processing_dir = self.work_dir.clone();
+        // Mark job as processing
+        self.queue.update(job_id, |job| {
+            job.start();
+            job.update_progress(Progress::new(1, TOTAL_STEPS, "Starting"));
+        });
+        self.metrics.record_job_started();
+        let queue_wait_ms = self
+            .queue
+            .get(job_id)
+            .map(|job| (chrono::Utc::now() - job.created_at).num_milliseconds().max(0) as u64)
+            .unwrap_or(0);
+        self.metrics.record_job_queue_wait_ms(queue_wait_ms);
+
+        // Broadcast status change via WebSocket
+        self.broadcaster
+            .broadcast_status_change(job_id, JobStatus::Queued, JobStatus::Processing)
+            .await;
+        self.broadcaster
+            .broadcast_progress(job_id, 1, TOTAL_STEPS, "Starting")
+            .await;
+
+        // Use a per-job work directory for intermediate files.
+        let processing_dir = self.work_dir.join(format!("job_{}", job_id.simple()));
         if let Err(e) = std::fs::create_dir_all(&processing_dir) {
             let error_msg = format!("Failed to create working directory: {}", e);
             self.queue.update(job_id, |job| {
                 job.fail(error_msg.clone());
             });
+            self.metrics.record_job_failed_with_timing(0, 0);
             self.broadcaster.broadcast_error(job_id, &error_msg).await;
             return;
         }
@@ -304,71 +201,176 @@ impl JobWorker {
             self.queue.update(job_id, |job| {
                 job.fail(error_msg.clone());
             });
+            self.metrics.record_job_failed_with_timing(0, 0);
             self.broadcaster.broadcast_error(job_id, &error_msg).await;
             return;
         }
 
-        // Convert options to pipeline config
-        let config = to_pipeline_config(&options);
-        let pipeline = PdfPipeline::new(config);
-
-        // Create progress callback
-        let progress =
-            WebProgressCallback::new(job_id, self.queue.clone(), self.broadcaster.clone());
-
-        // Run pipeline directly (it handles its own async/blocking balance)
-        let result = pipeline
-            .process_with_progress(&input_path, &processing_dir, &progress)
-            .await;
-
-        match result {
-            Ok(pipeline_result) => {
-                // Pipeline succeeded
-                let final_output_path = {
-                    let preferred =
-                        preferred_output_path(&final_output_dir, &input_filename, job_id);
-                    if preferred != pipeline_result.output_path {
-                        if let Err(rename_err) =
-                            std::fs::rename(&pipeline_result.output_path, &preferred)
-                        {
-                            // Handle cross-filesystem moves by copying.
-                            if let Err(copy_err) =
-                                std::fs::copy(&pipeline_result.output_path, &preferred)
-                            {
-                                let error_msg = format!(
-                                    "Failed to finalize output filename: rename error: {}, copy error: {}",
-                                    rename_err, copy_err
-                                );
-                                self.queue.update(job_id, |job| {
-                                    job.fail(error_msg.clone());
-                                });
-                                self.broadcaster.broadcast_error(job_id, &error_msg).await;
-                                return;
-                            }
-                            std::fs::remove_file(&pipeline_result.output_path).ok();
-                        }
-                    }
-                    preferred
-                };
-
-                let page_count = pipeline_result.page_count;
-                let elapsed = pipeline_result.elapsed_seconds;
-                self.queue.update(job_id, |job| {
-                    job.complete(final_output_path);
-                });
-                // Broadcast completion via WebSocket
-                self.broadcaster
-                    .broadcast_completed(job_id, elapsed, page_count)
-                    .await;
-            }
+        let page_count = match crate::LopdfReader::new(&input_path) {
+            Ok(reader) => reader.info.page_count,
             Err(e) => {
-                // Pipeline error
-                let error_msg = format!("Pipeline error: {}", e);
+                let error_msg = format!("Failed to read input PDF: {}", e);
                 self.queue.update(job_id, |job| {
                     job.fail(error_msg.clone());
                 });
+                self.metrics.record_job_failed_with_timing(0, 0);
                 self.broadcaster.broadcast_error(job_id, &error_msg).await;
+                return;
             }
+        };
+
+        let start = std::time::Instant::now();
+        let queue = self.queue.clone();
+        let broadcaster = self.broadcaster.clone();
+        let done_pages = Arc::new(AtomicUsize::new(0));
+        let done_pages_cb = done_pages.clone();
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<ProgressDispatch>();
+        let progress_tx_cb = progress_tx.clone();
+        let progress_queue = queue.clone();
+        let progress_broadcaster = broadcaster.clone();
+        let progress_task = tokio::spawn(async move {
+            while let Some(msg) = progress_rx.recv().await {
+                let progress = Progress {
+                    current_step: msg.current_step,
+                    total_steps: msg.total_steps,
+                    step_name: msg.step_name.clone(),
+                    percent: msg.percent,
+                };
+                progress_queue.update(job_id, |job| {
+                    job.update_progress(progress.clone());
+                });
+                progress_broadcaster
+                    .broadcast_progress_precise(
+                        job_id,
+                        msg.current_step,
+                        msg.total_steps,
+                        &msg.step_name,
+                        msg.percent,
+                    )
+                    .await;
+            }
+        });
+
+        let runner = build_standard_pipeline_runner(
+            PipelineRunnerConfig {
+                max_parallel_pages: config.resolved_page_parallel(),
+                cpu_min_parallel_pages: config.resolved_cpu_dynamic_min_parallel(),
+                cpu_target_load_per_core: config.resolved_cpu_target_load_per_core(),
+                cpu_status_poll_ms: config.resolved_cpu_status_poll_ms(),
+                work_base_dir: processing_dir.clone(),
+                retry: RetryConfig {
+                    max_attempts: config.retry.max_attempts,
+                    backoff_ms: config.retry.backoff_ms,
+                },
+            },
+            input_path.clone(),
+            final_output_dir.clone(),
+            &config,
+        );
+
+        let page_results = runner
+            .run_all(
+                page_count,
+                Some(Arc::new(move |event: ProgressEvent| {
+                    let (current_step, step_name) = stage_to_step(&event.stage);
+                    let completed_pages = if event.stage == "done" {
+                        done_pages_cb.fetch_add(1, Ordering::Relaxed) + 1
+                    } else {
+                        done_pages_cb.load(Ordering::Relaxed)
+                    };
+
+                    let fraction = if page_count == 0 {
+                        0.0
+                    } else {
+                        completed_pages as f32 / page_count as f32
+                    };
+                    let overall = ((current_step.saturating_sub(1)) as f32 + fraction)
+                        / TOTAL_STEPS as f32;
+                    let percent = (overall.clamp(0.0, 1.0) * 100.0) as u8;
+                    let _ = progress_tx_cb.send(ProgressDispatch {
+                        current_step,
+                        total_steps: TOTAL_STEPS,
+                        step_name: step_name.to_string(),
+                        percent,
+                    });
+                })),
+            )
+            .await;
+        drop(progress_tx);
+        let _ = progress_task.await;
+
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let gpu_stage_ms = if config.upscale.enable || config.ocr.enable {
+            elapsed_ms
+        } else {
+            0
+        };
+
+        let ok_pages = page_results.iter().filter(|r| r.success).count();
+        if ok_pages != page_count {
+            let first_error = page_results
+                .iter()
+                .find(|r| !r.success)
+                .and_then(|r| r.error.clone())
+                .unwrap_or_else(|| "Unknown page error".to_string());
+            let error_msg = format!("PipelineRunner error: {}", first_error);
+            self.queue.update(job_id, |job| {
+                job.fail(error_msg.clone());
+            });
+            self.metrics
+                .record_job_failed_with_timing(elapsed_ms, gpu_stage_ms);
+            self.broadcaster.broadcast_error(job_id, &error_msg).await;
+            std::fs::remove_dir_all(&processing_dir).ok();
+            return;
+        }
+
+        let page_images: Vec<PathBuf> = (0..page_count)
+            .map(|i| processing_dir.join(format!("{:04}", i)).join("gaozou.webp"))
+            .collect();
+
+        if page_images.iter().any(|p| !p.exists()) {
+            let error_msg = "PipelineRunner completed but output page image is missing".to_string();
+            self.queue.update(job_id, |job| {
+                job.fail(error_msg.clone());
+            });
+            self.metrics
+                .record_job_failed_with_timing(elapsed_ms, gpu_stage_ms);
+            self.broadcaster.broadcast_error(job_id, &error_msg).await;
+            std::fs::remove_dir_all(&processing_dir).ok();
+            return;
+        }
+
+        let final_output_path = preferred_output_path(&final_output_dir, &input_filename, job_id);
+        let pdf_opts = PdfWriterOptions::builder()
+            .dpi(config.load.dpi)
+            .jpeg_quality(config.save.jpeg_quality)
+            .build();
+
+        if let Err(e) = PrintPdfWriter::create_from_images(&page_images, &final_output_path, &pdf_opts)
+        {
+            let error_msg = format!("Failed to create PDF: {}", e);
+            self.queue.update(job_id, |job| {
+                job.fail(error_msg.clone());
+            });
+            self.metrics
+                .record_job_failed_with_timing(elapsed_ms, gpu_stage_ms);
+            self.broadcaster.broadcast_error(job_id, &error_msg).await;
+            std::fs::remove_dir_all(&processing_dir).ok();
+            return;
+        }
+
+        let elapsed = start.elapsed().as_secs_f64();
+        self.metrics
+            .record_job_completed_with_gpu(elapsed_ms, page_count as u64, gpu_stage_ms);
+        self.queue.update(job_id, |job| {
+            job.complete(final_output_path);
+        });
+        self.broadcaster
+            .broadcast_completed(job_id, elapsed, page_count)
+            .await;
+
+        if config.cleanup.enable {
+            std::fs::remove_dir_all(&processing_dir).ok();
         }
     }
 }
@@ -406,6 +408,7 @@ impl WorkerPool {
         output_dir: PathBuf,
         worker_count: usize,
         broadcaster: Arc<WsBroadcaster>,
+        metrics: Arc<MetricsCollector>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel::<WorkerMessage>(100);
 
@@ -418,6 +421,7 @@ impl WorkerPool {
             let output_dir = output_dir.clone();
             let receiver = receiver.clone();
             let broadcaster = broadcaster.clone();
+            let metrics = metrics.clone();
 
             tokio::spawn(async move {
                 loop {
@@ -430,7 +434,7 @@ impl WorkerPool {
                         Some(WorkerMessage::Process {
                             job_id,
                             input_path,
-                            options,
+                            effective_config,
                         }) => {
                             // Create a temporary worker for this job
                             let (_, dummy_rx) = mpsc::channel(1);
@@ -440,8 +444,11 @@ impl WorkerPool {
                                 work_dir.clone(),
                                 output_dir.clone(),
                                 broadcaster.clone(),
+                                metrics.clone(),
                             );
-                            worker.process_job(job_id, input_path, options).await;
+                            worker
+                                .process_job(job_id, input_path, effective_config)
+                                .await;
                         }
                         Some(WorkerMessage::Shutdown) | None => {
                             break;
@@ -464,13 +471,13 @@ impl WorkerPool {
         &self,
         job_id: Uuid,
         input_path: PathBuf,
-        options: ConvertOptions,
+        effective_config: PipelineTomlConfig,
     ) -> Result<(), String> {
         self.sender
             .send(WorkerMessage::Process {
                 job_id,
                 input_path,
-                options,
+                effective_config,
             })
             .await
             .map_err(|e| format!("Failed to submit job: {}", e))
@@ -508,7 +515,7 @@ mod tests {
         let msg = WorkerMessage::Process {
             job_id: Uuid::new_v4(),
             input_path: PathBuf::from("/test.pdf"),
-            options: ConvertOptions::default(),
+            effective_config: PipelineTomlConfig::default(),
         };
         let debug = format!("{:?}", msg);
         assert!(debug.contains("Process"));
@@ -520,38 +527,23 @@ mod tests {
         let work_dir = std::env::temp_dir();
         let output_dir = work_dir.join("output");
         let broadcaster = Arc::new(WsBroadcaster::new());
-        let _pool = WorkerPool::new(queue, work_dir, output_dir, 2, broadcaster);
+        let metrics = Arc::new(MetricsCollector::new());
+        let _pool = WorkerPool::new(queue, work_dir, output_dir, 2, broadcaster, metrics);
         // Pool created successfully
     }
 
     #[tokio::test]
-    async fn test_convert_options_to_pipeline_config() {
-        let options = ConvertOptions::default();
-        let config = to_pipeline_config(&options);
+    async fn test_page_parallel_used_directly() {
+        let mut config = PipelineTomlConfig::default();
+        config.concurrency.page_parallel = 3;
+        assert_eq!(config.resolved_page_parallel(), 3);
 
-        assert_eq!(config.dpi, 300);
-        assert!(config.deskew);
-        assert!(config.upscale);
-        assert!(!config.ocr);
-        assert!(!config.internal_resolution);
-    }
-
-    #[tokio::test]
-    async fn test_convert_options_advanced() {
-        let options = ConvertOptions {
-            dpi: 600,
-            deskew: true,
-            upscale: true,
-            ocr: true,
-            advanced: true,
-        };
-        let config = to_pipeline_config(&options);
-
-        assert_eq!(config.dpi, 600);
-        assert!(config.internal_resolution);
-        assert!(config.color_correction);
-        assert!(config.offset_alignment);
-        assert!(config.ocr);
+        config.concurrency.page_parallel = 0;
+        let expected_cpu = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(1);
+        assert_eq!(config.resolved_page_parallel(), expected_cpu);
     }
 
     #[tokio::test]
@@ -562,11 +554,18 @@ mod tests {
         std::fs::create_dir_all(&work_dir).ok();
 
         let broadcaster = Arc::new(WsBroadcaster::new());
-        let pool = WorkerPool::new(queue.clone(), work_dir.clone(), output_dir, 1, broadcaster);
+        let metrics = Arc::new(MetricsCollector::new());
+        let pool = WorkerPool::new(
+            queue.clone(),
+            work_dir.clone(),
+            output_dir,
+            1,
+            broadcaster,
+            metrics,
+        );
 
         // Create a job
-        let options = ConvertOptions::default();
-        let job = Job::new("test.pdf", options.clone());
+        let job = Job::new("test.pdf", crate::api_server::job::ConvertOptions::default());
         let job_id = job.id;
         queue.submit(job);
 
@@ -574,7 +573,9 @@ mod tests {
         let input_path = work_dir.join("invalid.pdf");
         std::fs::write(&input_path, b"not a valid pdf").ok();
 
-        pool.submit(job_id, input_path, options).await.unwrap();
+        pool.submit(job_id, input_path, PipelineTomlConfig::default())
+            .await
+            .unwrap();
 
         // Wait for processing
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;

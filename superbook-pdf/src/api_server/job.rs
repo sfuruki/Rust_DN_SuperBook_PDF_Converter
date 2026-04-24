@@ -2,6 +2,7 @@
 //!
 //! Handles job creation, status tracking, and queue management.
 
+use crate::config::PipelineTomlConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -116,6 +117,9 @@ pub struct Job {
     pub status: JobStatus,
     /// Conversion options
     pub options: ConvertOptions,
+    /// Resolved pipeline config used for execution and retry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_config: Option<PipelineTomlConfig>,
     /// Progress information (when processing)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<Progress>,
@@ -144,6 +148,7 @@ impl Job {
             id: Uuid::new_v4(),
             status: JobStatus::Queued,
             options,
+            effective_config: None,
             progress: None,
             input_filename: input_filename.into(),
             output_path: None,
@@ -152,6 +157,12 @@ impl Job {
             completed_at: None,
             error: None,
         }
+    }
+
+    /// Attach the resolved pipeline config used to execute this job.
+    pub fn with_effective_config(mut self, config: PipelineTomlConfig) -> Self {
+        self.effective_config = Some(config);
+        self
     }
 
     /// Mark job as processing

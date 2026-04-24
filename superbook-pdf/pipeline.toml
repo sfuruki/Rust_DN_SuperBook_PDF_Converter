@@ -1,0 +1,49 @@
+[load]
+dpi = 300
+
+[correct]
+enable = true
+deskew_strength = 0.8
+color_correction = true
+
+[upscale]
+scale = 2
+model = "realesrgan-x4plus"
+enable = true
+tile = 256
+fp32 = false
+
+[ocr_pre]
+margin_trim = false
+normalize_resolution = false
+
+[ocr]
+enable = false
+language = "jpn"
+confidence = 0.5
+format = "json"
+
+[save]
+output_height = 3508
+jpeg_quality = 90
+
+[cleanup]
+enable = false
+
+[validation]
+enable = true
+min_chars = 0
+
+[retry]
+max_attempts = 3
+backoff_ms = 500
+
+[concurrency]
+page_parallel = 0
+job_parallel = 0
+gpu_stage_parallel = 0
+gpu_safety_margin_mb = 3000
+gpu_status_poll_ms = 100
+cpu_dynamic_min_parallel = 0
+cpu_target_load_per_core = 0.9
+cpu_status_poll_ms = 200

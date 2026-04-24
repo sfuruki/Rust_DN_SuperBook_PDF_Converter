@@ -59,6 +59,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --features web -- -D warnings
 
+      - name: Build (web feature)
+        run: cargo build --features web
+
       - name: Run tests
         run: cargo test --features web
 

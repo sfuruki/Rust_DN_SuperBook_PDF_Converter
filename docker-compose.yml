@@ -92,6 +92,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - REALESRGAN_POOL_SIZE=0
     volumes:
       - ./data:/data:rw
       - ai-cache:/root/.cache

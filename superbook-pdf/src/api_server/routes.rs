@@ -3,18 +3,25 @@
 //! Provides endpoints for PDF conversion, job management, and health checks.
 
 use axum::{
-    extract::{Multipart, Path, State},
-    http::{header, StatusCode},
-    response::{IntoResponse, Json},
+    extract::{Multipart, Path, Query, State},
+    http::{header, HeaderMap, StatusCode},
+    response::{sse::Event, sse::KeepAlive, IntoResponse, Json, Sse},
     routing::{delete, get, post},
     Router,
 };
-use serde::Serialize;
+use chrono::Utc;
+use futures::stream;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use super::auth::{extract_api_key, AuthConfig, AuthManager, AuthResult, AuthStatusResponse};
+use super::auth::{
+    extract_api_key, AuthConfig, AuthManager, AuthResult, AuthStatusResponse, Scope,
+};
 use super::batch::{BatchJob, BatchProgress, BatchQueue, Priority};
 use super::job::{ConvertOptions, Job, JobQueue, JobStatus};
 use super::metrics::{MetricsCollector, StatsResponse, SystemMetrics};
@@ -24,11 +31,13 @@ use super::persistence::{
 use super::rate_limit::{
     RateLimitConfig, RateLimitError, RateLimitResult, RateLimitStatus, RateLimiter,
 };
-use super::websocket::{ws_job_handler, WsBroadcaster};
+use super::websocket::{ws_job_handler, WsBroadcaster, WsMessage};
 use super::worker::WorkerPool;
 
 use std::net::IpAddr;
 use std::path::{Path as StdPath, PathBuf};
+use std::{fs::OpenOptions, io::Write};
+use crate::config::PipelineTomlConfig;
 
 /// Application state shared across handlers
 pub struct AppState {
@@ -111,6 +120,7 @@ impl AppState {
             output_dir.clone(),
             worker_count,
             broadcaster.clone(),
+            metrics.clone(),
         );
 
         // Initialize job store if persistence is enabled
@@ -161,7 +171,7 @@ fn input_path_for_job(base_work_dir: &StdPath, job_id: Uuid, filename: &str) -> 
 /// Build the API router
 pub fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/convert", post(upload_and_convert))
+        .route("/convert", post(upload_and_start_job))
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}", delete(cancel_job))
         .route("/jobs/{id}/download", get(download_result))
@@ -176,6 +186,16 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/stats", get(get_stats))
         .route("/rate-limit/status", get(get_rate_limit_status))
         .route("/auth/status", get(get_auth_status))
+        .route("/config/schema", get(get_config_schema))
+        .route("/config/current", get(get_config_current))
+        .route("/config/list", get(get_config_list))
+        .route("/config/save", post(post_config_save))
+        .route("/config/validate", post(post_config_validate))
+        .route("/config/history", get(get_config_history))
+        .route("/config/restore", post(post_config_restore))
+        .route("/config/delete", post(post_config_delete))
+        .route("/config/load", post(post_config_load).get(get_config_load))
+        .route("/progress/stream", get(get_progress_stream))
 }
 
 /// Build the WebSocket router
@@ -519,6 +539,1196 @@ async fn get_auth_status(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ConfigSaveRequest {
+    #[serde(default)]
+    config: Option<Value>,
+    #[serde(default)]
+    toml: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigLoadRequest {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigLoadQuery {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigValidateRequest {
+    #[serde(default)]
+    config: Option<Value>,
+    #[serde(default)]
+    toml: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigDeleteRequest {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigHistoryQuery {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigRestoreRequest {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct JobStatusQuery {
+    job_id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobStartResponse {
+    pub job_id: Uuid,
+    pub status: String,
+    pub created_at: String,
+    pub total_pages: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_name: Option<String>,
+    pub effective_config_version: String,
+}
+
+fn preset_dir() -> PathBuf {
+    PathBuf::from("config-presets")
+}
+
+fn history_dir() -> PathBuf {
+    preset_dir().join(".history")
+}
+
+fn sanitize_config_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let sanitized: String = trimmed
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+fn config_path_by_name(name: &str) -> Result<PathBuf, String> {
+    let normalized = name.trim();
+    if normalized.eq_ignore_ascii_case("current") || normalized.eq_ignore_ascii_case("pipeline") {
+        return Ok(PathBuf::from("pipeline.toml"));
+    }
+
+    let safe = sanitize_config_name(normalized)
+        .ok_or_else(|| "Invalid config name: only [A-Za-z0-9_-] allowed".to_string())?;
+    Ok(preset_dir().join(format!("{}.toml", safe)))
+}
+
+fn trim_history_versions(name: &str, keep: usize) -> Result<(), String> {
+    let safe = match sanitize_config_name(name) {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+
+    let mut versions: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(history_dir()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                if file_name.starts_with(&format!("{}--", safe)) {
+                    versions.push(path);
+                }
+            }
+        }
+    }
+
+    versions.sort();
+    versions.reverse();
+
+    for old in versions.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(old);
+    }
+
+    Ok(())
+}
+
+fn create_history_snapshot(name: &str, path: &StdPath, new_content: &str) -> Result<Option<String>, String> {
+    let safe = match sanitize_config_name(name) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    if let Ok(current_content) = std::fs::read_to_string(path) {
+        if current_content == new_content {
+            return Ok(None);
+        }
+    }
+
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+
+    let dir = history_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let snapshot_path = dir.join(format!("{}--{}.toml", safe, epoch));
+    std::fs::copy(path, &snapshot_path).map_err(|e| e.to_string())?;
+    Ok(Some(snapshot_path.display().to_string()))
+}
+
+fn ws_message_to_event(msg: WsMessage) -> (String, String) {
+    let updated_at = Utc::now().to_rfc3339();
+    let data = match msg {
+        WsMessage::Progress {
+            job_id,
+            step_name,
+            ..
+        } => serde_json::json!({
+            "job_id": job_id,
+            "page": 0,
+            "status": "running",
+            "stage": step_name,
+            "updated_at": updated_at,
+        }),
+        WsMessage::StatusChange {
+            job_id,
+            new_status,
+            ..
+        } => {
+            let status = match new_status {
+                JobStatus::Queued => "pending",
+                JobStatus::Processing => "running",
+                JobStatus::Completed => "done",
+                JobStatus::Failed | JobStatus::Cancelled => "error",
+            };
+            serde_json::json!({
+                "job_id": job_id,
+                "page": 0,
+                "status": status,
+                "stage": "status",
+                "updated_at": updated_at,
+            })
+        }
+        WsMessage::Completed { job_id, .. } => serde_json::json!({
+            "job_id": job_id,
+            "page": 0,
+            "status": "done",
+            "stage": "save",
+            "updated_at": updated_at,
+        }),
+        WsMessage::Error { job_id, .. } => serde_json::json!({
+            "job_id": job_id,
+            "page": 0,
+            "status": "error",
+            "stage": "error",
+            "updated_at": updated_at,
+        }),
+        WsMessage::PagePreview {
+            job_id,
+            page_number,
+            stage,
+            ..
+        } => serde_json::json!({
+            "job_id": job_id,
+            "page": page_number,
+            "status": "running",
+            "stage": stage,
+            "updated_at": updated_at,
+        }),
+        WsMessage::Log { job_id, .. } => serde_json::json!({
+            "job_id": job_id,
+            "page": 0,
+            "status": "running",
+            "stage": "log",
+            "updated_at": updated_at,
+        }),
+        WsMessage::BatchProgress { batch_id, .. } | WsMessage::BatchCompleted { batch_id, .. } => {
+            serde_json::json!({
+                "job_id": batch_id,
+                "page": 0,
+                "status": "running",
+                "stage": "batch",
+                "updated_at": updated_at,
+            })
+        }
+        WsMessage::ServerShutdown { .. } => serde_json::json!({
+            "job_id": "server",
+            "page": 0,
+            "status": "error",
+            "stage": "shutdown",
+            "updated_at": updated_at,
+        }),
+    };
+
+    ("page_update".to_string(), data.to_string())
+}
+
+fn parse_config_request(
+    config: Option<Value>,
+    toml: Option<String>,
+) -> Result<PipelineTomlConfig, String> {
+    if let Some(cfg) = config {
+        reject_legacy_parallel_keys_json(&cfg)?;
+        return serde_json::from_value::<PipelineTomlConfig>(cfg)
+            .map_err(|e| format!("Invalid config JSON: {}", e));
+    }
+
+    if let Some(text) = toml {
+        return PipelineTomlConfig::from_toml(&text).map_err(|e| e.to_string());
+    }
+
+    Err("Missing config payload: provide `config`".to_string())
+}
+
+fn merge_json_values(base: &mut Value, overlay: Value) {
+    match (base, overlay) {
+        (Value::Object(base_map), Value::Object(overlay_map)) => {
+            for (k, v) in overlay_map {
+                merge_json_values(base_map.entry(k).or_insert(Value::Null), v);
+            }
+        }
+        (slot, value) => {
+            *slot = value;
+        }
+    }
+}
+
+fn reject_legacy_parallel_keys_json(value: &Value) -> Result<(), String> {
+    let Some(concurrency) = value.get("concurrency").and_then(|v| v.as_object()) else {
+        return Ok(());
+    };
+
+    if concurrency.contains_key("max_parallel_pages") {
+        return Err(
+            "Unsupported legacy key 'concurrency.max_parallel_pages'. Use 'concurrency.page_parallel'."
+                .to_string(),
+        );
+    }
+
+    if concurrency.contains_key("max_parallel_pages_cpu") {
+        return Err(
+            "Unsupported legacy key 'concurrency.max_parallel_pages_cpu'. Use 'concurrency.page_parallel'."
+                .to_string(),
+        );
+    }
+
+    if concurrency.contains_key("max_parallel_pages_gpu") {
+        return Err(
+            "Unsupported legacy key 'concurrency.max_parallel_pages_gpu'. Use 'concurrency.gpu_stage_parallel'."
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn config_fingerprint(config: &PipelineTomlConfig) -> String {
+    let text = config.to_toml().unwrap_or_default();
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in text.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("cfg-{:016x}", hash)
+}
+
+fn map_config_to_convert_options(config: &PipelineTomlConfig) -> ConvertOptions {
+    ConvertOptions {
+        dpi: config.load.dpi,
+        deskew: config.correct.enable,
+        upscale: config.upscale.enable,
+        ocr: config.ocr.enable,
+        advanced: config.correct.color_correction
+            || config.ocr_pre.margin_trim
+            || config.ocr_pre.normalize_resolution,
+    }
+}
+
+fn convert_options_to_pipeline_toml_config(options: &ConvertOptions) -> PipelineTomlConfig {
+    let mut config = PipelineTomlConfig::default();
+    config.load.dpi = options.dpi;
+    config.correct.enable = options.deskew;
+    config.correct.color_correction = options.advanced;
+    config.upscale.enable = options.upscale;
+    config.ocr.enable = options.ocr;
+    config.ocr_pre.margin_trim = options.advanced;
+    config.ocr_pre.normalize_resolution = options.advanced;
+    config
+}
+
+fn job_effective_config(job: &Job) -> PipelineTomlConfig {
+    job.effective_config
+        .clone()
+        .unwrap_or_else(|| convert_options_to_pipeline_toml_config(&job.options))
+}
+
+fn resolve_effective_config(
+    config_name: Option<&str>,
+    inline_config: Option<Value>,
+) -> Result<(PipelineTomlConfig, Option<String>, String), String> {
+    let mut merged = serde_json::to_value(PipelineTomlConfig::load().unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+
+    let mut normalized_name: Option<String> = None;
+
+    if let Some(name) = config_name {
+        let trimmed = name.trim();
+        let preset = if trimmed.eq_ignore_ascii_case("pipeline")
+            || trimmed.eq_ignore_ascii_case("current")
+        {
+            // pipeline/current はファイル未配置でも既定値で解決できる。
+            PipelineTomlConfig::load().unwrap_or_default()
+        } else {
+            let path = config_path_by_name(trimmed)?;
+            if !path.exists() {
+                return Err(format!("Config not found: {}", path.display()));
+            }
+            PipelineTomlConfig::load_from_path(&path).map_err(|e| e.to_string())?
+        };
+        let preset_json = serde_json::to_value(preset).map_err(|e| e.to_string())?;
+        merge_json_values(&mut merged, preset_json);
+        normalized_name = Some(trimmed.to_string());
+    }
+
+    if let Some(inline) = inline_config {
+        reject_legacy_parallel_keys_json(&inline)?;
+        merge_json_values(&mut merged, inline);
+    }
+
+    let effective: PipelineTomlConfig =
+        serde_json::from_value(merged).map_err(|e| format!("Invalid inline config: {}", e))?;
+    let version = config_fingerprint(&effective);
+
+    Ok((effective, normalized_name, version))
+}
+
+fn probe_pdf_total_pages(pdf_path: &StdPath) -> usize {
+    let output = std::process::Command::new("pdfinfo").arg(pdf_path).output();
+    if let Ok(out) = output {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if line.starts_with("Pages:") {
+                    if let Some(n) = line.split_whitespace().nth(1) {
+                        if let Ok(v) = n.parse::<usize>() {
+                            return v;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+fn authorize_scope(
+    state: &AppState,
+    headers: &HeaderMap,
+    required_scope: Scope,
+) -> Result<Option<String>, AppError> {
+    if !state.auth_manager.is_enabled() {
+        return Ok(None);
+    }
+
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let x_api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
+
+    let api_key = extract_api_key(authorization, x_api_key)
+        .ok_or_else(|| AppError::Unauthorized("API key required".to_string()))?;
+
+    match state.auth_manager.validate(&api_key) {
+        AuthResult::Authenticated { key_name, scopes } => {
+            let ok = scopes.iter().any(|s| s.includes(required_scope));
+            if ok {
+                Ok(Some(key_name))
+            } else {
+                Err(AppError::Forbidden("Insufficient scope".to_string()))
+            }
+        }
+        AuthResult::Disabled => Ok(None),
+        AuthResult::Expired => Err(AppError::Unauthorized("API key expired".to_string())),
+        AuthResult::InvalidKey => Err(AppError::Unauthorized("Invalid API key".to_string())),
+        AuthResult::Missing => Err(AppError::Unauthorized("API key missing".to_string())),
+    }
+}
+
+fn extract_single_page_pdf(source_pdf: &StdPath, page: usize, output_pdf: &StdPath) -> Result<(), AppError> {
+    if page == 0 {
+        return Err(AppError::BadRequest("page must be >= 1".to_string()));
+    }
+
+    if let Some(parent) = output_pdf.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AppError::Internal(format!("Failed to create page extract directory: {}", e)))?;
+    }
+
+    let status = std::process::Command::new("pdfseparate")
+        .arg("-f")
+        .arg(page.to_string())
+        .arg("-l")
+        .arg(page.to_string())
+        .arg(source_pdf)
+        .arg(output_pdf)
+        .status()
+        .map_err(|e| AppError::Internal(format!("Failed to run pdfseparate: {}", e)))?;
+
+    if !status.success() {
+        return Err(AppError::Internal("pdfseparate failed to extract requested page".to_string()));
+    }
+
+    if !output_pdf.exists() {
+        return Err(AppError::Internal("extracted page PDF was not created".to_string()));
+    }
+
+    Ok(())
+}
+
+fn write_audit_log(
+    state: &AppState,
+    user_id: Option<&str>,
+    action: &str,
+    details: serde_json::Value,
+) {
+    let path = std::env::var("SUPERBOOK_AUDIT_LOG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| state.worker_pool.work_dir().join("audit.log"));
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let event = serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "user_id": user_id.unwrap_or("anonymous"),
+        "action": action,
+        "details": details,
+    });
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{}", event);
+    }
+}
+
+async fn get_config_schema() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "schema_version": "1.0.0",
+        "fields": [
+            {
+                "path": "load.dpi",
+                "type": "number",
+                "min": 72,
+                "max": 1200,
+                "default": 300,
+                "ui": "input",
+                "label": "DPI",
+                "description": "PDF extraction DPI"
+            },
+            {
+                "path": "correct.enable",
+                "type": "boolean",
+                "default": true,
+                "ui": "toggle",
+                "label": "補正有効",
+                "description": "Deskew stage enable"
+            },
+            {
+                "path": "correct.deskew_strength",
+                "type": "number",
+                "min": 0.0,
+                "max": 1.0,
+                "default": 0.8,
+                "ui": "slider",
+                "label": "傾き補正強度",
+                "description": "0.0=off, 1.0=max"
+            },
+            {
+                "path": "upscale.scale",
+                "type": "number",
+                "enum": [1,2,4],
+                "default": 2,
+                "ui": "select",
+                "label": "超解像倍率",
+                "description": "RealESRGAN upscale factor"
+            },
+            {
+                "path": "upscale.model",
+                "type": "string",
+                "enum": ["realesrgan-x2plus", "realesrgan-x4plus"],
+                "default": "realesrgan-x4plus",
+                "ui": "select",
+                "label": "超解像モデル",
+                "description": "RealESRGAN model name"
+            },
+            {
+                "path": "ocr.enable",
+                "type": "boolean",
+                "default": false,
+                "ui": "toggle",
+                "label": "OCR有効",
+                "description": "Enable OCR stage"
+            },
+            {
+                "path": "ocr.language",
+                "type": "string",
+                "enum": ["jpn", "ja", "ja-jp", "japanese"],
+                "default": "jpn",
+                "ui": "select",
+                "label": "OCR言語",
+                "description": "OCR language"
+            },
+            {
+                "path": "retry.max_attempts",
+                "type": "number",
+                "min": 1,
+                "max": 10,
+                "default": 3,
+                "ui": "input",
+                "label": "最大リトライ回数",
+                "description": "Retry count per stage"
+            },
+            {
+                "path": "retry.backoff_ms",
+                "type": "number",
+                "min": 0,
+                "max": 60000,
+                "default": 500,
+                "ui": "input",
+                "label": "バックオフ(ms)",
+                "description": "Initial retry backoff"
+            },
+            {
+                "path": "concurrency.page_parallel",
+                "type": "number",
+                "min": 0,
+                "max": 256,
+                "default": 0,
+                "ui": "input",
+                "label": "ページ並列",
+                "description": "Per-job page parallelism (0 = fully dynamic auto)"
+            },
+            {
+                "path": "concurrency.job_parallel",
+                "type": "number",
+                "min": 0,
+                "max": 256,
+                "default": 0,
+                "ui": "input",
+                "label": "同時ジョブ並列",
+                "description": "Concurrent job count (0 = fully dynamic auto)"
+            },
+            {
+                "path": "concurrency.gpu_stage_parallel",
+                "type": "number",
+                "min": 0,
+                "max": 256,
+                "default": 0,
+                "ui": "input",
+                "label": "GPUステージ並列",
+                "description": "Concurrent GPU stage invocations (0 = fully dynamic auto)"
+            },
+            {
+                "path": "concurrency.cpu_dynamic_min_parallel",
+                "type": "number",
+                "min": 0,
+                "max": 256,
+                "default": 0,
+                "ui": "input",
+                "label": "CPU最小並列",
+                "description": "Minimum per-job parallelism when CPU dynamic control throttles (0 = auto)"
+            },
+            {
+                "path": "concurrency.cpu_target_load_per_core",
+                "type": "number",
+                "min": 0.1,
+                "max": 4.0,
+                "default": 0.9,
+                "ui": "input",
+                "label": "CPU目標負荷/コア",
+                "description": "Target 1m load average per CPU core"
+            },
+            {
+                "path": "concurrency.cpu_status_poll_ms",
+                "type": "number",
+                "min": 20,
+                "max": 10000,
+                "default": 200,
+                "ui": "input",
+                "label": "CPU再評価間隔(ms)",
+                "description": "Polling interval for CPU dynamic parallelism"
+            }
+        ]
+    }))
+}
+
+async fn get_config_current() -> impl IntoResponse {
+    let config = PipelineTomlConfig::load().unwrap_or_default();
+    let version = config_fingerprint(&config);
+    (StatusCode::OK, Json(serde_json::json!({ "name": "pipeline", "config": config, "version": version }))).into_response()
+}
+
+async fn get_config_list() -> impl IntoResponse {
+    let mut names = vec!["pipeline".to_string()];
+    let dir = preset_dir();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    Json(serde_json::json!({ "configs": names }))
+}
+
+async fn post_config_save(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ConfigSaveRequest>,
+) -> impl IntoResponse {
+    let auth_user = match authorize_scope(&state, &headers, Scope::Write) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    match parse_config_request(req.config, req.toml) {
+        Ok(config) => {
+            let req_name = req.name.clone();
+
+            let path = match req_name.as_deref() {
+                Some(name) => match config_path_by_name(name) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "ok": false, "error": e })),
+                        )
+                            .into_response();
+                    }
+                },
+                None => PathBuf::from("pipeline.toml"),
+            };
+
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+
+            let content = match config.to_toml() {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+                    )
+                        .into_response();
+                }
+            };
+
+            let history_snapshot = if let Some(name) = req_name.as_deref() {
+                if !name.eq_ignore_ascii_case("pipeline") {
+                    match create_history_snapshot(name, &path, &content) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({ "ok": false, "error": e })),
+                            )
+                                .into_response();
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let response = match std::fs::write(&path, content) {
+                Ok(_) => {
+                    if let Some(name) = req_name.as_deref() {
+                        let _ = trim_history_versions(name, 20);
+                    }
+
+                    write_audit_log(
+                        &state,
+                        auth_user.as_deref(),
+                        "config/save",
+                        serde_json::json!({
+                            "name": req_name,
+                            "path": path.display().to_string(),
+                            "version": config_fingerprint(&config),
+                        }),
+                    );
+
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "ok": true,
+                            "name": req_name,
+                            "config": config,
+                            "version": config_fingerprint(&config),
+                            "path": path.display().to_string(),
+                            "history_snapshot": history_snapshot,
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+                )
+                    .into_response(),
+            };
+
+            response
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn post_config_restore(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ConfigRestoreRequest>,
+) -> impl IntoResponse {
+    let auth_user = match authorize_scope(&state, &headers, Scope::Write) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    let safe = match sanitize_config_name(&req.name) {
+        Some(v) => v,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": "Invalid config name" })),
+            )
+                .into_response();
+        }
+    };
+
+    let version_file = req.version.trim();
+    if !version_file.starts_with(&format!("{}--", safe)) || !version_file.ends_with(".toml") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "Invalid version" })),
+        )
+            .into_response();
+    }
+
+    let source = history_dir().join(version_file);
+    if !source.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": "Version not found" })),
+        )
+            .into_response();
+    }
+
+    let target = match config_path_by_name(&req.name) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": e })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    match std::fs::copy(&source, &target) {
+        Ok(_) => match PipelineTomlConfig::load_from_path(&target) {
+            Ok(config) => {
+                write_audit_log(
+                    &state,
+                    auth_user.as_deref(),
+                    "config/restore",
+                    serde_json::json!({
+                        "name": req.name,
+                        "restored_version": req.version,
+                        "version": config_fingerprint(&config),
+                    }),
+                );
+
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "name": req.name,
+                        "restored_version": req.version,
+                        "config": config,
+                        "version": config_fingerprint(&config),
+                    })),
+                )
+                    .into_response()
+            }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn post_config_validate(Json(req): Json<ConfigValidateRequest>) -> impl IntoResponse {
+    match parse_config_request(req.config, req.toml) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "message": "Valid pipeline config" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_config_history(Query(query): Query<ConfigHistoryQuery>) -> impl IntoResponse {
+    let safe = match sanitize_config_name(&query.name) {
+        Some(v) => v,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": "Invalid config name" })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut versions: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(history_dir()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with(&format!("{}--", safe)) {
+                    versions.push(name.to_string());
+                }
+            }
+        }
+    }
+    versions.sort();
+    versions.reverse();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "name": query.name, "versions": versions })),
+    )
+        .into_response()
+}
+
+async fn post_config_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ConfigDeleteRequest>,
+) -> impl IntoResponse {
+    let auth_user = match authorize_scope(&state, &headers, Scope::Admin) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    let trimmed = req.name.trim();
+    if trimmed.eq_ignore_ascii_case("pipeline") || trimmed.eq_ignore_ascii_case("current") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "Cannot delete pipeline config" })),
+        )
+            .into_response();
+    }
+
+    let path = match config_path_by_name(trimmed) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": e })),
+            )
+                .into_response();
+        }
+    };
+
+    if !path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": "Config not found" })),
+        )
+            .into_response();
+    }
+
+    match std::fs::remove_file(&path) {
+        Ok(_) => {
+            write_audit_log(
+                &state,
+                auth_user.as_deref(),
+                "config/delete",
+                serde_json::json!({
+                    "name": trimmed,
+                    "path": path.display().to_string(),
+                }),
+            );
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "deleted": trimmed })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_config_load(Query(query): Query<ConfigLoadQuery>) -> impl IntoResponse {
+    let path = match config_path_by_name(&query.name) {
+        Ok(path) => path,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": e })),
+            )
+                .into_response();
+        }
+    };
+
+    match PipelineTomlConfig::load_from_path(&path) {
+        Ok(config) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "name": query.name,
+                "config": config,
+                "version": config_fingerprint(&config),
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_progress_stream(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<JobStatusQuery>,
+) -> impl IntoResponse {
+    let receiver = state.broadcaster.subscribe(query.job_id).await;
+    let stream = stream::unfold(receiver, |mut rx| async move {
+        match rx.recv().await {
+            Ok(msg) => {
+                let (event_name, data) = ws_message_to_event(msg);
+                let event = Event::default().event(event_name).data(data);
+                Some((Ok::<Event, Infallible>(event), rx))
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                let event = Event::default().event("warning").data(
+                    serde_json::json!({
+                        "message": "SSE stream lagged",
+                        "skipped": skipped
+                    })
+                    .to_string(),
+                );
+                Some((Ok::<Event, Infallible>(event), rx))
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+        }
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
+}
+
+async fn upload_and_start_job(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<JobStartResponse>), AppError> {
+    let auth_user = authorize_scope(&state, &headers, Scope::Write)?;
+
+    let mut filename = String::new();
+    let mut file_data: Option<Vec<u8>> = None;
+    let mut config_name: Option<String> = None;
+    let mut inline_config: Option<Value> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "file" => {
+                filename = field.file_name().unwrap_or("upload.pdf").to_string();
+                let bytes = field.bytes().await.map_err(|e| {
+                    AppError::BadRequest(format!("Failed to read uploaded file data: {}", e))
+                })?;
+                file_data = Some(bytes.to_vec());
+            }
+            "config_name" => {
+                if let Ok(text) = field.text().await {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        config_name = Some(trimmed.to_string());
+                    }
+                }
+            }
+            "inline_config" => {
+                if let Ok(text) = field.text().await {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        inline_config = Some(
+                            serde_json::from_str::<Value>(trimmed).map_err(|e| {
+                                AppError::BadRequest(format!("Invalid inline_config JSON: {}", e))
+                            })?,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if filename.is_empty() {
+        return Err(AppError::BadRequest("No file uploaded".to_string()));
+    }
+
+    let file_data = file_data.ok_or_else(|| AppError::BadRequest("No file data".to_string()))?;
+
+    let (effective_config, normalized_name, effective_version) = resolve_effective_config(
+        config_name.as_deref(),
+        inline_config,
+    )
+    .map_err(AppError::BadRequest)?;
+
+    let options = map_config_to_convert_options(&effective_config);
+
+    let job = Job::new(&filename, options.clone()).with_effective_config(effective_config.clone());
+    let job_id = job.id;
+    let created_at = job.created_at.to_rfc3339();
+
+    let input_path = input_path_for_job(state.worker_pool.work_dir(), job_id, &filename);
+    if let Some(parent) = input_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AppError::Internal(format!("Failed to create upload directory: {}", e)))?;
+    }
+    std::fs::write(&input_path, &file_data)
+        .map_err(|e| AppError::Internal(format!("Failed to save uploaded file: {}", e)))?;
+
+    let total_pages = probe_pdf_total_pages(&input_path);
+
+    state.queue.submit(job);
+
+    if let Err(e) = state
+        .worker_pool
+        .submit(job_id, input_path, effective_config)
+        .await
+    {
+        state.queue.update(job_id, |job| {
+            job.fail(format!("Failed to start processing: {}", e));
+        });
+    }
+
+    write_audit_log(
+        &state,
+        auth_user.as_deref(),
+        "job/start",
+        serde_json::json!({
+            "job_id": job_id,
+            "config_name": normalized_name,
+            "effective_config_version": effective_version,
+            "input_filename": filename,
+        }),
+    );
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(JobStartResponse {
+            job_id,
+            status: "pending".to_string(),
+            created_at,
+            total_pages,
+            config_name: normalized_name,
+            effective_config_version: effective_version,
+        }),
+    ))
+}
+
+async fn get_job_status_query(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<JobStatusQuery>,
+) -> Result<Json<Job>, AppError> {
+    state
+        .queue
+        .get(query.job_id)
+        .map(Json)
+        .ok_or(AppError::NotFound(format!("Job {} not found", query.job_id)))
+}
+
+async fn post_config_load(Json(req): Json<ConfigLoadRequest>) -> impl IntoResponse {
+    let requested_path = req.path.clone();
+    let path = PathBuf::from(req.path);
+    match PipelineTomlConfig::load_from_path(&path) {
+        Ok(config) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "name": requested_path, "config": config, "version": config_fingerprint(&config) })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// Get job history
 async fn get_job_history(
     State(state): State<Arc<AppState>>,
@@ -581,7 +1791,9 @@ async fn retry_job(
     }
 
     // Create a new job based on the failed one
-    let new_job = Job::new(&job.input_filename, job.options.clone());
+    let retry_config = job_effective_config(&job);
+    let new_job = Job::new(&job.input_filename, job.options.clone())
+        .with_effective_config(retry_config.clone());
     let new_job_id = new_job.id;
 
     // Submit the new job
@@ -602,7 +1814,7 @@ async fn retry_job(
         if std::fs::copy(&input_path, &new_input_path).is_ok() {
             if let Err(e) = state
                 .worker_pool
-                .submit(new_job_id, new_input_path, job.options.clone())
+                .submit(new_job_id, new_input_path, retry_config)
                 .await
             {
                 state.queue.update(new_job_id, |job| {
@@ -613,156 +1825,6 @@ async fn retry_job(
     }
 
     Ok(Json(RetryResponse::success(new_job_id)))
-}
-
-/// Upload request response
-#[derive(Debug, Serialize)]
-pub struct UploadResponse {
-    pub job_id: Uuid,
-    pub status: String,
-    pub created_at: String,
-}
-
-fn parse_convert_options(text: &str) -> Option<ConvertOptions> {
-    fn parse_relaxed_object_literal(input: &str) -> Option<ConvertOptions> {
-        let mut normalized = input.trim().to_string();
-        if !normalized.starts_with('{') || !normalized.ends_with('}') {
-            return None;
-        }
-
-        // Some clients send object-literal-like payloads without quoted keys.
-        for key in ["dpi", "deskew", "upscale", "ocr", "advanced"] {
-            let from = format!("{}:", key);
-            let to = format!("\"{}\":", key);
-            normalized = normalized.replace(&from, &to);
-        }
-
-        serde_json::from_str::<ConvertOptions>(&normalized).ok()
-    }
-
-    let trimmed = text.trim();
-
-    // Handle payloads like \"{...}\" (double-encoded string without outer JSON quotes).
-    if trimmed.starts_with("\\\"") && trimmed.ends_with("\\\"") && trimmed.len() >= 4 {
-        let inner = &trimmed[2..trimmed.len() - 2];
-        let unescaped = inner.replace("\\\\\"", "\"").replace("\\\"", "\"");
-        if let Some(parsed) = parse_convert_options(&unescaped) {
-            return Some(parsed);
-        }
-    }
-
-    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        if let Some(raw) = value.as_str() {
-            if let Some(parsed) = parse_convert_options(raw) {
-                return Some(parsed);
-            }
-        }
-
-        if let Some(options_value) = value.get("options") {
-            if let Ok(parsed) = serde_json::from_value::<ConvertOptions>(options_value.clone()) {
-                return Some(parsed);
-            }
-        }
-
-        if let Ok(parsed) = serde_json::from_value::<ConvertOptions>(value.clone()) {
-            return Some(parsed);
-        }
-    }
-
-    if let Ok(parsed) = serde_json::from_str::<BatchRequest>(trimmed) {
-        return Some(parsed.options);
-    }
-
-    if let Ok(parsed) = serde_json::from_str::<ConvertOptions>(trimmed) {
-        return Some(parsed);
-    }
-
-    if let Some(parsed) = parse_relaxed_object_literal(trimmed) {
-        return Some(parsed);
-    }
-
-    None
-}
-
-/// Upload and convert a PDF
-async fn upload_and_convert(
-    State(state): State<Arc<AppState>>,
-    mut multipart: Multipart,
-) -> Result<(StatusCode, Json<UploadResponse>), AppError> {
-    let mut filename = String::new();
-    let mut options = ConvertOptions::default();
-    let mut file_data: Option<Vec<u8>> = None;
-
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let name = field.name().unwrap_or("").to_string();
-
-        match name.as_str() {
-            "file" => {
-                filename = field.file_name().unwrap_or("upload.pdf").to_string();
-                match field.bytes().await {
-                    Ok(data) => {
-                        file_data = Some(data.to_vec());
-                    }
-                    Err(e) => {
-                        return Err(AppError::BadRequest(format!(
-                            "Failed to read uploaded file data: {}",
-                            e
-                        )));
-                    }
-                }
-            }
-            "options" => {
-                if let Ok(text) = field.text().await {
-                    if let Some(parsed) = parse_convert_options(&text) {
-                        options = parsed;
-                    } else {
-                        eprintln!("Warning: Failed to parse convert options payload: {}", text);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if filename.is_empty() {
-        return Err(AppError::BadRequest("No file uploaded".to_string()));
-    }
-
-    let file_data = file_data.ok_or_else(|| AppError::BadRequest("No file data".to_string()))?;
-
-    // Create job
-    let job = Job::new(&filename, options.clone());
-    let job_id = job.id;
-    let created_at = job.created_at.to_rfc3339();
-
-    // Save uploaded file
-    let input_path = input_path_for_job(state.worker_pool.work_dir(), job_id, &filename);
-    if let Some(parent) = input_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| AppError::Internal(format!("Failed to create upload directory: {}", e)))?;
-    }
-    std::fs::write(&input_path, &file_data)
-        .map_err(|e| AppError::Internal(format!("Failed to save uploaded file: {}", e)))?;
-
-    // Submit job to queue
-    state.queue.submit(job);
-
-    // Trigger background processing
-    if let Err(e) = state.worker_pool.submit(job_id, input_path, options).await {
-        // Update job as failed if we couldn't submit
-        state.queue.update(job_id, |job| {
-            job.fail(format!("Failed to start processing: {}", e));
-        });
-    }
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(UploadResponse {
-            job_id,
-            status: "queued".to_string(),
-            created_at,
-        }),
-    ))
 }
 
 /// Get job status
@@ -866,6 +1928,14 @@ pub struct BatchRequest {
     pub priority: Priority,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct BatchConfigRequest {
+    pub config_name: Option<String>,
+    pub inline_config: Option<Value>,
+    #[serde(default)]
+    pub priority: Priority,
+}
+
 /// Batch creation response
 #[derive(Debug, Serialize)]
 pub struct BatchResponse {
@@ -930,7 +2000,8 @@ async fn create_batch(
 ) -> Result<(StatusCode, Json<BatchResponse>), AppError> {
     let mut filenames: Vec<String> = Vec::new();
     let mut file_data_list: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut options = ConvertOptions::default();
+    let mut effective_config = PipelineTomlConfig::default();
+    let mut options = map_config_to_convert_options(&effective_config);
     let mut priority = Priority::default();
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -954,10 +2025,21 @@ async fn create_batch(
             }
             "options" => {
                 if let Ok(text) = field.text().await {
-                    if let Ok(parsed) = serde_json::from_str::<BatchRequest>(&text) {
+                    if let Ok(parsed) = serde_json::from_str::<BatchConfigRequest>(&text) {
+                        let (resolved, _, _) = resolve_effective_config(
+                            parsed.config_name.as_deref(),
+                            parsed.inline_config,
+                        )
+                        .map_err(AppError::BadRequest)?;
+                        effective_config = resolved;
+                        options = map_config_to_convert_options(&effective_config);
+                        priority = parsed.priority;
+                    } else if let Ok(parsed) = serde_json::from_str::<BatchRequest>(&text) {
+                        effective_config = convert_options_to_pipeline_toml_config(&parsed.options);
                         options = parsed.options;
                         priority = parsed.priority;
                     } else if let Ok(parsed) = serde_json::from_str::<ConvertOptions>(&text) {
+                        effective_config = convert_options_to_pipeline_toml_config(&parsed);
                         options = parsed;
                     }
                 }
@@ -977,7 +2059,8 @@ async fn create_batch(
 
     // Create individual jobs and save files
     for (filename, data) in file_data_list {
-        let job = Job::new(&filename, options.clone());
+        let job = Job::new(&filename, options.clone())
+            .with_effective_config(effective_config.clone());
         let job_id = job.id;
 
         // Save uploaded file
@@ -997,7 +2080,7 @@ async fn create_batch(
         // Start processing
         if let Err(e) = state
             .worker_pool
-            .submit(job_id, input_path, options.clone())
+            .submit(job_id, input_path, effective_config.clone())
             .await
         {
             state.queue.update(job_id, |job| {
@@ -1118,6 +2201,8 @@ async fn cancel_batch(
 #[derive(Debug)]
 pub enum AppError {
     BadRequest(String),
+    Unauthorized(String),
+    Forbidden(String),
     NotFound(String),
     Conflict(String),
     Internal(String),
@@ -1132,19 +2217,62 @@ impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         #[derive(Serialize)]
         struct ErrorResponse {
-            error: String,
+            error_code: String,
+            message: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            details: Option<serde_json::Value>,
             #[serde(skip_serializing_if = "Option::is_none")]
             retry_after: Option<u64>,
         }
 
-        let (status, message, retry_after) = match &self {
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone(), None),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone(), None),
-            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone(), None),
-            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone(), None),
+        let (status, code, message, details, retry_after) = match &self {
+            AppError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_FAILED".to_string(),
+                msg.clone(),
+                None,
+                None,
+            ),
+            AppError::Unauthorized(msg) => (
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED".to_string(),
+                msg.clone(),
+                None,
+                None,
+            ),
+            AppError::Forbidden(msg) => (
+                StatusCode::FORBIDDEN,
+                "FORBIDDEN".to_string(),
+                msg.clone(),
+                None,
+                None,
+            ),
+            AppError::NotFound(msg) => (
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND".to_string(),
+                msg.clone(),
+                None,
+                None,
+            ),
+            AppError::Conflict(msg) => (
+                StatusCode::CONFLICT,
+                "CONFLICT".to_string(),
+                msg.clone(),
+                None,
+                None,
+            ),
+            AppError::Internal(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR".to_string(),
+                msg.clone(),
+                None,
+                None,
+            ),
             AppError::TooManyRequests { retry_after } => (
                 StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMIT_EXCEEDED".to_string(),
                 "Rate limit exceeded".to_string(),
+                None,
                 Some(*retry_after),
             ),
         };
@@ -1152,7 +2280,9 @@ impl IntoResponse for AppError {
         let mut response = (
             status,
             Json(ErrorResponse {
-                error: message,
+                error_code: code,
+                message,
+                details,
                 retry_after,
             }),
         )
@@ -1171,6 +2301,30 @@ impl IntoResponse for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_reject_legacy_parallel_keys_json_max_parallel_pages() {
+        let json = serde_json::json!({
+            "concurrency": {
+                "max_parallel_pages": 2
+            }
+        });
+
+        let err = reject_legacy_parallel_keys_json(&json).unwrap_err();
+        assert!(err.contains("Unsupported legacy key"));
+    }
+
+    #[test]
+    fn test_parse_config_request_rejects_legacy_parallel_keys_json() {
+        let json = serde_json::json!({
+            "concurrency": {
+                "max_parallel_pages_gpu": 3
+            }
+        });
+
+        let err = parse_config_request(Some(json), None).unwrap_err();
+        assert!(err.contains("Unsupported legacy key"));
+    }
 
     #[tokio::test]
     async fn test_app_state_new() {

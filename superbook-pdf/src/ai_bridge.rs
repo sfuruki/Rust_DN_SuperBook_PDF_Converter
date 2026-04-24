@@ -502,7 +502,7 @@ impl AiBridge for HttpApiBridge {
                         })?;
 
                     let output_path = output_dir.join(format!(
-                        "{}{}x.png",
+                        "{}{}x.webp",
                         input_file.file_stem().unwrap().to_string_lossy(),
                         opts.scale
                     ));
@@ -528,8 +528,55 @@ impl AiBridge for HttpApiBridge {
                             .await
                         {
                             Ok(resp) if resp.status().is_success() => {
-                                processed.push(output_path.clone());
-                                break;
+                                match resp.json::<UpscaleResponse>().await {
+                                    Ok(body) => {
+                                        if body.exit_code == 0 && output_path.exists() {
+                                            processed.push(output_path.clone());
+                                            break;
+                                        }
+
+                                        last_error = format!(
+                                            "upscale failed: exit_code={} error={}",
+                                            body.exit_code,
+                                            body.error.unwrap_or_else(|| "unknown".to_string())
+                                        );
+                                        if attempt < self.config.retry_config.max_retries {
+                                            let backoff_secs =
+                                                if self.config.retry_config.exponential_backoff {
+                                                    2u64.pow(attempt - 1)
+                                                } else {
+                                                    self.config.retry_config.retry_interval.as_secs()
+                                                };
+                                            eprintln!(
+                                                "⚠️  Upscale attempt {}/{} failed ({}). Retrying in {}s...",
+                                                attempt,
+                                                self.config.retry_config.max_retries,
+                                                last_error,
+                                                backoff_secs
+                                            );
+                                            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        last_error = format!("invalid upscale response: {}", e);
+                                        if attempt < self.config.retry_config.max_retries {
+                                            let backoff_secs =
+                                                if self.config.retry_config.exponential_backoff {
+                                                    2u64.pow(attempt - 1)
+                                                } else {
+                                                    self.config.retry_config.retry_interval.as_secs()
+                                                };
+                                            eprintln!(
+                                                "⚠️  Upscale attempt {}/{} failed ({}). Retrying in {}s...",
+                                                attempt,
+                                                self.config.retry_config.max_retries,
+                                                last_error,
+                                                backoff_secs
+                                            );
+                                            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                                        }
+                                    }
+                                }
                             }
                             Ok(resp) => {
                                 last_error = format!("HTTP error: {}", resp.status());
@@ -725,6 +772,14 @@ struct UpscaleRequest {
     model_name: String,
     fp32: bool,
     gpu_id: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UpscaleResponse {
+    #[serde(default)]
+    exit_code: i32,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

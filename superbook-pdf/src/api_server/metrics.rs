@@ -25,6 +25,12 @@ pub struct JobStatistics {
     pub avg_processing_time: f64,
     /// Total pages processed
     pub total_pages_processed: u64,
+    /// Average queue wait time in milliseconds
+    pub avg_queue_wait_ms: f64,
+    /// Average GPU-stage time in milliseconds
+    pub avg_gpu_stage_ms: f64,
+    /// Average end-to-end job time in milliseconds
+    pub avg_job_total_ms: f64,
 }
 
 /// Batch statistics
@@ -87,6 +93,14 @@ pub struct MetricsCollector {
     total_processing_ms: AtomicU64,
     /// Total pages processed
     total_pages: AtomicU64,
+    /// Total queue wait in milliseconds
+    total_queue_wait_ms: AtomicU64,
+    /// Total GPU-stage time in milliseconds
+    total_gpu_stage_ms: AtomicU64,
+    /// Total end-to-end job time in milliseconds
+    total_job_total_ms: AtomicU64,
+    /// Number of finished jobs used for timing averages
+    finished_jobs: AtomicU64,
     /// Total batches
     total_batches: AtomicU64,
     /// Completed batches
@@ -107,6 +121,10 @@ impl MetricsCollector {
             active_jobs: AtomicU64::new(0),
             total_processing_ms: AtomicU64::new(0),
             total_pages: AtomicU64::new(0),
+            total_queue_wait_ms: AtomicU64::new(0),
+            total_gpu_stage_ms: AtomicU64::new(0),
+            total_job_total_ms: AtomicU64::new(0),
+            finished_jobs: AtomicU64::new(0),
             total_batches: AtomicU64::new(0),
             completed_batches: AtomicU64::new(0),
             active_batches: AtomicU64::new(0),
@@ -119,19 +137,45 @@ impl MetricsCollector {
         self.active_jobs.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record queue wait time for a started job
+    pub fn record_job_queue_wait_ms(&self, queue_wait_ms: u64) {
+        self.total_queue_wait_ms
+            .fetch_add(queue_wait_ms, Ordering::Relaxed);
+    }
+
     /// Record a job completion
     pub fn record_job_completed(&self, duration_ms: u64, pages: u64) {
+        self.record_job_completed_with_gpu(duration_ms, pages, 0);
+    }
+
+    /// Record a job completion with GPU-stage timing
+    pub fn record_job_completed_with_gpu(&self, duration_ms: u64, pages: u64, gpu_stage_ms: u64) {
         self.completed_jobs.fetch_add(1, Ordering::Relaxed);
         self.active_jobs.fetch_sub(1, Ordering::Relaxed);
         self.total_processing_ms
             .fetch_add(duration_ms, Ordering::Relaxed);
         self.total_pages.fetch_add(pages, Ordering::Relaxed);
+        self.total_job_total_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
+        self.total_gpu_stage_ms
+            .fetch_add(gpu_stage_ms, Ordering::Relaxed);
+        self.finished_jobs.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a job failure
     pub fn record_job_failed(&self) {
+        self.record_job_failed_with_timing(0, 0);
+    }
+
+    /// Record a job failure with timing (used for bottleneck metrics)
+    pub fn record_job_failed_with_timing(&self, duration_ms: u64, gpu_stage_ms: u64) {
         self.failed_jobs.fetch_add(1, Ordering::Relaxed);
         self.active_jobs.fetch_sub(1, Ordering::Relaxed);
+        self.total_job_total_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
+        self.total_gpu_stage_ms
+            .fetch_add(gpu_stage_ms, Ordering::Relaxed);
+        self.finished_jobs.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a batch being started
@@ -155,6 +199,8 @@ impl MetricsCollector {
     pub fn get_job_statistics(&self, queued_jobs: u64) -> JobStatistics {
         let completed = self.completed_jobs.load(Ordering::Relaxed);
         let total_ms = self.total_processing_ms.load(Ordering::Relaxed);
+        let total_jobs = self.total_jobs.load(Ordering::Relaxed);
+        let finished_jobs = self.finished_jobs.load(Ordering::Relaxed);
 
         let avg_time = if completed > 0 {
             (total_ms as f64 / completed as f64) / 1000.0
@@ -162,14 +208,35 @@ impl MetricsCollector {
             0.0
         };
 
+        let avg_queue_wait_ms = if total_jobs > 0 {
+            self.total_queue_wait_ms.load(Ordering::Relaxed) as f64 / total_jobs as f64
+        } else {
+            0.0
+        };
+
+        let avg_gpu_stage_ms = if finished_jobs > 0 {
+            self.total_gpu_stage_ms.load(Ordering::Relaxed) as f64 / finished_jobs as f64
+        } else {
+            0.0
+        };
+
+        let avg_job_total_ms = if finished_jobs > 0 {
+            self.total_job_total_ms.load(Ordering::Relaxed) as f64 / finished_jobs as f64
+        } else {
+            0.0
+        };
+
         JobStatistics {
-            total_jobs: self.total_jobs.load(Ordering::Relaxed),
+            total_jobs,
             completed_jobs: completed,
             failed_jobs: self.failed_jobs.load(Ordering::Relaxed),
             active_jobs: self.active_jobs.load(Ordering::Relaxed),
             queued_jobs,
             avg_processing_time: avg_time,
             total_pages_processed: self.total_pages.load(Ordering::Relaxed),
+            avg_queue_wait_ms,
+            avg_gpu_stage_ms,
+            avg_job_total_ms,
         }
     }
 
@@ -238,6 +305,27 @@ impl MetricsCollector {
         output.push_str(&format!(
             "superbook_avg_processing_seconds {:.2}\n",
             stats.avg_processing_time
+        ));
+
+        output.push_str("\n# HELP superbook_avg_queue_wait_ms Average queue wait time in milliseconds\n");
+        output.push_str("# TYPE superbook_avg_queue_wait_ms gauge\n");
+        output.push_str(&format!(
+            "superbook_avg_queue_wait_ms {:.2}\n",
+            stats.avg_queue_wait_ms
+        ));
+
+        output.push_str("\n# HELP superbook_avg_gpu_stage_ms Average GPU-stage time in milliseconds\n");
+        output.push_str("# TYPE superbook_avg_gpu_stage_ms gauge\n");
+        output.push_str(&format!(
+            "superbook_avg_gpu_stage_ms {:.2}\n",
+            stats.avg_gpu_stage_ms
+        ));
+
+        output.push_str("\n# HELP superbook_avg_job_total_ms Average end-to-end job time in milliseconds\n");
+        output.push_str("# TYPE superbook_avg_job_total_ms gauge\n");
+        output.push_str(&format!(
+            "superbook_avg_job_total_ms {:.2}\n",
+            stats.avg_job_total_ms
         ));
 
         // Batches
@@ -369,6 +457,9 @@ mod tests {
             queued_jobs: 2,
             avg_processing_time: 45.5,
             total_pages_processed: 5000,
+            avg_queue_wait_ms: 12.0,
+            avg_gpu_stage_ms: 101.0,
+            avg_job_total_ms: 220.0,
         };
 
         let json = serde_json::to_string(&stats).unwrap();
@@ -473,6 +564,9 @@ mod tests {
                 queued_jobs: 2,
                 avg_processing_time: 45.5,
                 total_pages_processed: 5000,
+                avg_queue_wait_ms: 12.0,
+                avg_gpu_stage_ms: 101.0,
+                avg_job_total_ms: 220.0,
             },
             batches: BatchStatistics {
                 total: 20,

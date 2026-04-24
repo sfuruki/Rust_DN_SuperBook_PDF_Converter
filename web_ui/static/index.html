@@ -129,6 +129,102 @@
             border-radius: 4px;
         }
 
+        .config-editor {
+            width: 100%;
+            min-height: 180px;
+            margin-top: 10px;
+            border: 1px solid #d8d8d8;
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 0.86rem;
+            resize: vertical;
+        }
+
+        .config-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+
+        .config-row {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .config-input,
+        .config-select {
+            min-width: 180px;
+            border: 1px solid #d8d8d8;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-size: 0.9rem;
+            background: #fff;
+        }
+
+        .config-btn {
+            border: 1px solid #4a90d9;
+            background: #4a90d9;
+            color: #fff;
+            border-radius: 6px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+
+        .config-btn.secondary {
+            background: #fff;
+            color: #2b5f94;
+        }
+
+        .config-hint {
+            color: #666;
+            font-size: 0.82rem;
+            margin-top: 8px;
+        }
+
+        .config-schema-form {
+            margin-top: 12px;
+            border: 1px solid #e3e3e3;
+            border-radius: 8px;
+            padding: 12px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 10px;
+            background: #fafafa;
+        }
+
+        .schema-field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .schema-label {
+            font-size: 0.82rem;
+            color: #374151;
+            font-weight: 600;
+        }
+
+        .schema-desc {
+            font-size: 0.75rem;
+            color: #6b7280;
+            line-height: 1.3;
+        }
+
+        .schema-input,
+        .schema-select {
+            border: 1px solid #cfd4dc;
+            border-radius: 6px;
+            padding: 7px 8px;
+            font-size: 0.85rem;
+            background: #fff;
+        }
+
         .option-item-stacked {
             display: block;
         }
@@ -461,72 +557,37 @@
             <input type="file" id="file-input" accept=".pdf">
         </div>
 
-        <!-- Options Section -->
+        <!-- Convert Section (config-driven only) -->
         <div class="card">
-            <h2 class="options-title">変換オプション</h2>
-
-            <!-- DPI Slider -->
-            <div class="option-item" style="margin-bottom: 16px;">
-                <label for="dpi-slider">出力DPI:</label>
-                <div class="slider-container">
-                    <input type="range" id="dpi-slider" min="150" max="600" value="300" step="50">
-                    <span class="slider-value" id="dpi-value">300 DPI</span>
-                </div>
-                <input type="hidden" id="dpi" value="300">
-            </div>
-
-            <!-- Basic Options -->
-            <div class="options-grid">
-                <div class="option-item option-item-stacked">
-                    <div class="option-main">
-                        <input type="checkbox" id="deskew" checked>
-                        <label for="deskew">傾き補正（Deskew / 180度回転判定を含む）</label>
-                    </div>
-                    <span class="option-note">誤回転が気になる場合は OFF にしてください</span>
-                </div>
-                <div class="option-item">
-                    <input type="checkbox" id="upscale" checked>
-                    <label for="upscale">AI超解像</label>
-                </div>
-                <div class="option-item">
-                    <input type="checkbox" id="ocr">
-                    <label for="ocr">OCR (日本語)</label>
-                </div>
-            </div>
-
-            <!-- Advanced Options Toggle -->
-            <div class="advanced-toggle" id="advanced-toggle">
-                <span class="arrow">▶</span>
-                <span>高度なオプション</span>
-            </div>
-
-            <!-- Advanced Options Panel -->
-            <div class="advanced-options" id="advanced-options">
-                <div class="options-grid">
-                    <div class="option-item" style="grid-column: 1 / -1;">
-                        <label for="margin-slider">マージントリム:</label>
-                        <div class="slider-container">
-                            <input type="range" id="margin-slider" min="0" max="5" value="0.5" step="0.5">
-                            <span class="slider-value" id="margin-value">0.5%</span>
-                        </div>
-                    </div>
-                    <div class="option-item">
-                        <input type="checkbox" id="color-correction">
-                        <label for="color-correction">色補正</label>
-                    </div>
-                    <div class="option-item">
-                        <input type="checkbox" id="offset-alignment">
-                        <label for="offset-alignment">オフセット整列</label>
-                    </div>
-                    <div class="option-item">
-                        <input type="checkbox" id="internal-resolution">
-                        <label for="internal-resolution">内部解像度正規化</label>
-                    </div>
-                </div>
-            </div>
-            <input type="hidden" id="advanced" value="false">
-
+            <h2 class="options-title">変換実行</h2>
+            <p class="config-hint">変換オプションは下の「pipeline.toml 設定管理」で一元管理します。ここでは実行のみ行います。</p>
             <button class="convert-btn" id="convert-btn" disabled>変換開始</button>
+        </div>
+
+        <!-- Config Management Section -->
+        <div class="card">
+            <h2 class="options-title">pipeline.toml 設定管理</h2>
+            <textarea id="config-editor" class="config-editor" placeholder="pipeline.toml を読み込み中..."></textarea>
+            <div class="config-row">
+                <input type="text" id="config-name" class="config-input" placeholder="保存名 (例: high-quality)">
+                <select id="config-list" class="config-select">
+                    <option value="pipeline">pipeline</option>
+                </select>
+                <button type="button" class="config-btn secondary" id="config-refresh-list-btn">一覧更新</button>
+                <button type="button" class="config-btn secondary" id="config-load-btn">選択設定を読込</button>
+            </div>
+            <div class="config-actions">
+                <button type="button" class="config-btn secondary" id="config-reload-btn">現在設定を再読込</button>
+                <button type="button" class="config-btn" id="config-save-btn">設定を保存</button>
+                <button type="button" class="config-btn secondary" id="config-delete-btn">選択設定を削除</button>
+                <button type="button" class="config-btn secondary" id="config-validate-btn">設定を検証</button>
+                <button type="button" class="config-btn secondary" id="config-export-btn">エクスポート</button>
+                <button type="button" class="config-btn secondary" id="config-import-btn">インポート</button>
+                <input type="file" id="config-import-file" accept=".toml,.txt" style="display:none;">
+                <button type="button" class="config-btn secondary" id="config-schema-btn">スキーマ表示</button>
+            </div>
+            <div id="config-schema-form" class="config-schema-form"></div>
+            <p class="config-hint" id="config-hint">API: /api/config/current, /api/config/list, /api/config/load, /api/config/save, /api/config/history, /api/config/validate, /api/config/delete</p>
         </div>
 
         <!-- Preview Section -->
@@ -578,6 +639,7 @@
         </footer>
     </div>
 
+    <script src="virtual-list.js"></script>
     <script>
         const uploadArea = document.getElementById('upload-area');
         const fileInput = document.getElementById('file-input');
@@ -597,56 +659,161 @@
         const downloadLink = document.getElementById('download-link');
         const errorMessage = document.getElementById('error-message');
         const retryBtn = document.getElementById('retry-btn');
+        const configEditor = document.getElementById('config-editor');
+        const configNameInput = document.getElementById('config-name');
+        const configList = document.getElementById('config-list');
+        const configReloadBtn = document.getElementById('config-reload-btn');
+        const configRefreshListBtn = document.getElementById('config-refresh-list-btn');
+        const configLoadBtn = document.getElementById('config-load-btn');
+        const configSaveBtn = document.getElementById('config-save-btn');
+        const configDeleteBtn = document.getElementById('config-delete-btn');
+        const configValidateBtn = document.getElementById('config-validate-btn');
+        const configExportBtn = document.getElementById('config-export-btn');
+        const configImportBtn = document.getElementById('config-import-btn');
+        const configImportFile = document.getElementById('config-import-file');
+        const configSchemaBtn = document.getElementById('config-schema-btn');
+        const configSchemaForm = document.getElementById('config-schema-form');
+        const configHint = document.getElementById('config-hint');
 
         let currentFile = null;
         let currentJobId = null;
         let ws = null;
+        let sse = null;
         let elapsedTimer = null;
         let elapsedStart = null;
         let lastPercent = 0;
         let pulseTimer = null;
         let pollInterval = null;
+        let schemaFields = [];
+        const pageStatusMap = new Map();
 
-        // DPI Slider
-        const dpiSlider = document.getElementById('dpi-slider');
-        const dpiValue = document.getElementById('dpi-value');
-        const dpiInput = document.getElementById('dpi');
-
-        dpiSlider.addEventListener('input', () => {
-            const val = dpiSlider.value;
-            dpiValue.textContent = val + ' DPI';
-            dpiInput.value = val;
-        });
-
-        // Margin Slider
-        const marginSlider = document.getElementById('margin-slider');
-        const marginValue = document.getElementById('margin-value');
-
-        marginSlider.addEventListener('input', () => {
-            marginValue.textContent = marginSlider.value + '%';
-        });
-
-        // Advanced Options Toggle
-        const advancedToggle = document.getElementById('advanced-toggle');
-        const advancedOptions = document.getElementById('advanced-options');
-        const advancedInput = document.getElementById('advanced');
-
-        advancedToggle.addEventListener('click', () => {
-            advancedToggle.classList.toggle('open');
-            advancedOptions.classList.toggle('open');
-            updateAdvancedState();
-        });
-
-        function updateAdvancedState() {
-            const colorCorrection = document.getElementById('color-correction').checked;
-            const offsetAlignment = document.getElementById('offset-alignment').checked;
-            const internalRes = document.getElementById('internal-resolution').checked;
-            advancedInput.value = colorCorrection || offsetAlignment || internalRes;
+        function getByPath(obj, path) {
+            return path.split('.').reduce((acc, key) => {
+                if (acc && Object.prototype.hasOwnProperty.call(acc, key)) {
+                    return acc[key];
+                }
+                return undefined;
+            }, obj);
         }
 
-        document.querySelectorAll('#advanced-options input[type="checkbox"]').forEach(cb => {
-            cb.addEventListener('change', updateAdvancedState);
-        });
+        function setByPath(obj, path, value) {
+            const keys = path.split('.');
+            let target = obj;
+            for (let i = 0; i < keys.length - 1; i += 1) {
+                const key = keys[i];
+                if (typeof target[key] !== 'object' || target[key] === null || Array.isArray(target[key])) {
+                    target[key] = {};
+                }
+                target = target[key];
+            }
+            target[keys[keys.length - 1]] = value;
+        }
+
+        function parseConfigEditorJson() {
+            try {
+                return JSON.parse(configEditor.value || '{}');
+            } catch (_) {
+                return null;
+            }
+        }
+
+        function writeConfigEditorJson(config) {
+            configEditor.value = JSON.stringify(config || {}, null, 2);
+        }
+
+        function coerceSchemaValue(field, raw) {
+            if (field.type === 'boolean') {
+                return Boolean(raw);
+            }
+            if (field.type === 'number') {
+                const n = Number(raw);
+                return Number.isFinite(n) ? n : (field.default ?? 0);
+            }
+            return String(raw ?? '');
+        }
+
+        function renderSchemaForm(config) {
+            if (!Array.isArray(schemaFields) || schemaFields.length === 0) {
+                configSchemaForm.innerHTML = '<div class="schema-desc">スキーマ未取得です。スキーマ表示ボタンで読み込んでください。</div>';
+                return;
+            }
+
+            configSchemaForm.innerHTML = '';
+            schemaFields.forEach((field) => {
+                const wrap = document.createElement('div');
+                wrap.className = 'schema-field';
+
+                const label = document.createElement('label');
+                label.className = 'schema-label';
+                label.textContent = (field.label || field.path) + ' (' + field.path + ')';
+                wrap.appendChild(label);
+
+                let input;
+                const currentValue = getByPath(config, field.path);
+                const value = currentValue !== undefined ? currentValue : field.default;
+
+                if (Array.isArray(field.enum)) {
+                    input = document.createElement('select');
+                    input.className = 'schema-select';
+                    field.enum.forEach((item) => {
+                        const opt = document.createElement('option');
+                        opt.value = String(item);
+                        opt.textContent = String(item);
+                        if (String(item) === String(value)) {
+                            opt.selected = true;
+                        }
+                        input.appendChild(opt);
+                    });
+                } else if (field.type === 'boolean') {
+                    input = document.createElement('input');
+                    input.type = 'checkbox';
+                    input.className = 'schema-input';
+                    input.checked = Boolean(value);
+                } else if (field.ui === 'slider' && field.type === 'number') {
+                    input = document.createElement('input');
+                    input.type = 'range';
+                    input.className = 'schema-input';
+                    input.min = String(field.min ?? 0);
+                    input.max = String(field.max ?? 100);
+                    input.step = '0.1';
+                    input.value = String(value ?? field.default ?? 0);
+                } else {
+                    input = document.createElement('input');
+                    input.type = field.type === 'number' ? 'number' : 'text';
+                    input.className = 'schema-input';
+                    if (field.type === 'number') {
+                        if (field.min !== undefined) input.min = String(field.min);
+                        if (field.max !== undefined) input.max = String(field.max);
+                    }
+                    input.value = String(value ?? '');
+                }
+
+                input.addEventListener('input', () => {
+                    const latest = parseConfigEditorJson();
+                    if (!latest) {
+                        configHint.textContent = 'JSONが不正なためスキーマ編集を適用できません。';
+                        return;
+                    }
+
+                    const raw = (input.type === 'checkbox') ? input.checked : input.value;
+                    setByPath(latest, field.path, coerceSchemaValue(field, raw));
+                    writeConfigEditorJson(latest);
+                });
+
+                wrap.appendChild(input);
+
+                if (field.description) {
+                    const desc = document.createElement('div');
+                    desc.className = 'schema-desc';
+                    desc.textContent = field.description;
+                    wrap.appendChild(desc);
+                }
+
+                configSchemaForm.appendChild(wrap);
+            });
+        }
+
+        // 旧オプションUIは廃止し、設定管理(JSON)を単一の設定入口として使用する
 
         // Preview Section
         const previewSection = document.getElementById('preview-section');
@@ -708,6 +875,270 @@
                 document.getElementById('version').textContent = data.version;
             });
 
+        async function loadCurrentConfig() {
+            try {
+                const response = await fetch('/api/config/current', { cache: 'no-store' });
+                if (!response.ok) throw new Error('Failed to load config');
+                const data = await response.json();
+                configEditor.value = JSON.stringify(data.config || {}, null, 2);
+                configList.value = 'pipeline';
+                configHint.textContent = '現在の設定を読み込みました。';
+            } catch (e) {
+                configHint.textContent = '設定読込エラー: ' + e.message;
+            }
+        }
+
+        async function refreshConfigList() {
+            try {
+                const response = await fetch('/api/config/list', { cache: 'no-store' });
+                if (!response.ok) throw new Error('Failed to load config list');
+                const data = await response.json();
+                const names = Array.isArray(data.configs) ? data.configs : [];
+                const current = configList.value || 'pipeline';
+                configList.innerHTML = '';
+                names.forEach((name) => {
+                    const opt = document.createElement('option');
+                    opt.value = name;
+                    opt.textContent = name;
+                    configList.appendChild(opt);
+                });
+                configList.value = names.includes(current) ? current : 'pipeline';
+            } catch (e) {
+                configHint.textContent = '設定一覧取得エラー: ' + e.message;
+            }
+        }
+
+        async function loadNamedConfig() {
+            const name = (configList.value || '').trim();
+            if (!name) return;
+            try {
+                const response = await fetch('/api/config/load?name=' + encodeURIComponent(name), {
+                    cache: 'no-store'
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    throw new Error(data.error || 'Failed to load config');
+                }
+                configEditor.value = JSON.stringify(data.config || {}, null, 2);
+                configNameInput.value = name === 'pipeline' ? '' : name;
+                configHint.textContent = '設定を読み込みました: ' + name;
+                await showConfigHistory(name);
+            } catch (e) {
+                configHint.textContent = '設定読込エラー: ' + e.message;
+            }
+        }
+
+        async function saveCurrentConfig() {
+            const name = (configNameInput.value || '').trim();
+            try {
+                const parsedConfig = JSON.parse(configEditor.value || '{}');
+                const response = await fetch('/api/config/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        config: parsedConfig,
+                        name: name || undefined
+                    })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    throw new Error(data.error || 'Failed to save config');
+                }
+                const snapshot = data.history_snapshot ? ' / 履歴: ' + data.history_snapshot : '';
+                configHint.textContent = '設定を保存しました: ' + data.path + snapshot;
+                await refreshConfigList();
+                if (name) {
+                    configList.value = name;
+                    await showConfigHistory(name);
+                }
+            } catch (e) {
+                configHint.textContent = '設定保存エラー: ' + e.message;
+            }
+        }
+
+        async function validateCurrentConfig() {
+            try {
+                const parsedConfig = JSON.parse(configEditor.value || '{}');
+                const response = await fetch('/api/config/validate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ config: parsedConfig })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    throw new Error(data.error || 'Validation failed');
+                }
+                configHint.textContent = '設定検証OK: ' + (data.message || 'Valid');
+            } catch (e) {
+                configHint.textContent = '設定検証エラー: ' + e.message;
+            }
+        }
+
+        async function deleteSelectedConfig() {
+            const name = (configList.value || '').trim();
+            if (!name || name === 'pipeline') {
+                configHint.textContent = 'pipeline は削除できません。';
+                return;
+            }
+            if (!confirm('設定「' + name + '」を削除しますか？')) {
+                return;
+            }
+            try {
+                const response = await fetch('/api/config/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    throw new Error(data.error || 'Failed to delete config');
+                }
+                configHint.textContent = '設定を削除しました: ' + name;
+                await refreshConfigList();
+                configList.value = 'pipeline';
+            } catch (e) {
+                configHint.textContent = '設定削除エラー: ' + e.message;
+            }
+        }
+
+        async function showConfigHistory(name) {
+            if (!name || name === 'pipeline') {
+                return;
+            }
+            try {
+                const response = await fetch('/api/config/history?name=' + encodeURIComponent(name), {
+                    cache: 'no-store'
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    return;
+                }
+                const versions = Array.isArray(data.versions) ? data.versions : [];
+                if (versions.length > 0) {
+                    configHint.textContent = '履歴 ' + versions.length + ' 件 / 最新: ' + versions[0];
+                }
+            } catch (_) {
+                // ignore history fetch failure
+            }
+        }
+
+        function exportCurrentConfig() {
+            const name = (configNameInput.value || configList.value || 'pipeline').trim();
+            const filename = (name || 'pipeline') + '.toml';
+            const blob = new Blob([configEditor.value], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            configHint.textContent = '設定をエクスポートしました: ' + filename;
+        }
+
+        function importConfigFromFile(file) {
+            if (!file) {
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = async () => {
+                configEditor.value = String(reader.result || '');
+                configHint.textContent = '設定をインポートしました: ' + file.name;
+                await validateCurrentConfig();
+            };
+            reader.onerror = () => {
+                configHint.textContent = 'インポートエラー: ファイルの読み込みに失敗しました。';
+            };
+            reader.readAsText(file, 'utf-8');
+        }
+
+        async function showConfigSchema() {
+            try {
+                const response = await fetch('/api/config/schema', { cache: 'no-store' });
+                if (!response.ok) throw new Error('Failed to load schema');
+                const data = await response.json();
+                schemaFields = Array.isArray(data.fields) ? data.fields : [];
+                const parsedConfig = parseConfigEditorJson() || {};
+                renderSchemaForm(parsedConfig);
+                configHint.textContent = 'schema_version=' + (data.schema_version || '-') + ' / fields=' + schemaFields.length;
+            } catch (e) {
+                configHint.textContent = 'スキーマ読込エラー: ' + e.message;
+            }
+        }
+
+        let pageVirtualList = null;
+
+        function initPageVirtualList() {
+            if (pageVirtualList) {
+                pageVirtualList.clear();
+            } else {
+                const listContainer = document.createElement('div');
+                listContainer.id = 'page-virtual-list-container';
+                progressLog.parentNode.insertBefore(listContainer, progressLog);
+                progressLog.style.display = 'none';
+                pageVirtualList = new VirtualList({
+                    container: listContainer,
+                    itemHeight: 24,
+                    visibleCount: 5
+                });
+            }
+            pageStatusMap.clear();
+        }
+
+        function updatePageStatusRow(page, status, stage) {
+            if (!page || page <= 0) return;
+
+            // Initialize virtual list on first page update
+            if (!pageVirtualList) {
+                initPageVirtualList();
+            }
+
+            const label = 'ページ ' + page + ': ' + status + ' (' + (stage || '-') + ')';
+            const item = { page, status, stage, label };
+
+            // Check if this page already exists
+            const existingIndex = pageStatusMap.has(page);
+            pageStatusMap.set(page, item);
+
+            if (!existingIndex) {
+                // Add new item for this page
+                const allItems = Array.from(pageStatusMap.values()).sort((a, b) => a.page - b.page);
+                pageVirtualList.setItems(allItems);
+            } else {
+                // Update existing item
+                const allItems = Array.from(pageStatusMap.values()).sort((a, b) => a.page - b.page);
+                const itemIndex = allItems.findIndex(it => it.page === page);
+                if (itemIndex >= 0) {
+                    pageVirtualList.updateItem(itemIndex, item);
+                }
+            }
+        }
+
+        configReloadBtn.addEventListener('click', loadCurrentConfig);
+        configRefreshListBtn.addEventListener('click', refreshConfigList);
+        configLoadBtn.addEventListener('click', loadNamedConfig);
+        configSaveBtn.addEventListener('click', saveCurrentConfig);
+        configDeleteBtn.addEventListener('click', deleteSelectedConfig);
+        configValidateBtn.addEventListener('click', validateCurrentConfig);
+        configExportBtn.addEventListener('click', exportCurrentConfig);
+        configImportBtn.addEventListener('click', () => configImportFile.click());
+        configImportFile.addEventListener('change', (e) => {
+            const file = e.target.files && e.target.files[0];
+            importConfigFromFile(file);
+            configImportFile.value = '';
+        });
+        configSchemaBtn.addEventListener('click', showConfigSchema);
+        configEditor.addEventListener('input', () => {
+            const parsed = parseConfigEditorJson();
+            if (parsed) {
+                renderSchemaForm(parsed);
+            }
+        });
+        refreshConfigList();
+        loadCurrentConfig();
+        showConfigSchema();
+
         // Retry button
         retryBtn.addEventListener('click', resetForm);
 
@@ -756,17 +1187,21 @@
             resultSuccess.style.display = 'none';
             resultError.style.display = 'none';
 
-            const options = {
-                dpi: parseInt(document.getElementById('dpi').value),
-                deskew: document.getElementById('deskew').checked,
-                upscale: document.getElementById('upscale').checked,
-                ocr: document.getElementById('ocr').checked,
-                advanced: document.getElementById('advanced').checked
-            };
-
             const formData = new FormData();
             formData.append('file', currentFile);
-            formData.append('options', JSON.stringify(options));
+
+            const selectedConfig = (configList && configList.value) ? configList.value.trim() : '';
+            if (selectedConfig) {
+                formData.append('config_name', selectedConfig);
+            }
+
+            const inlineConfig = parseConfigEditorJson();
+            if (inlineConfig === null) {
+                showError('設定エディタのJSON形式が不正です。修正してから再実行してください。');
+                convertBtn.disabled = false;
+                return;
+            }
+            formData.append('inline_config', JSON.stringify(inlineConfig));
 
             try {
                 const response = await fetch('/api/convert', {
@@ -802,36 +1237,43 @@
                         ? m + '分' + String(s).padStart(2, '0') + '秒'
                         : s + '秒';
                 }, 1000);
-                connectWebSocket(currentJobId);
+                connectProgressStream(currentJobId);
             } catch (error) {
                 showError(error.message);
             }
         });
 
-        // WebSocket connection for real-time progress updates
-        function connectWebSocket(jobId) {
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = protocol + '//' + location.host + '/ws/jobs/' + jobId;
-
+        // SSE connection for real-time progress updates
+        function connectProgressStream(jobId) {
+            const sseUrl = '/api/progress/stream?job_id=' + encodeURIComponent(jobId);
             stopPollingFallback();
-            ws = new WebSocket(wsUrl);
+            if (sse) {
+                sse.close();
+                sse = null;
+            }
+            sse = new EventSource(sseUrl);
 
-            ws.onopen = () => {
-                console.log('WebSocket connected for job:', jobId);
+            sse.onopen = () => {
+                console.log('SSE connected for job:', jobId);
                 syncJobState();
             };
 
-            ws.onmessage = (event) => {
+            const onSseMessage = (event) => {
                 try {
-                    const msg = JSON.parse(event.data);
-                    handleWebSocketMessage(msg);
+                    if (!event.data || event.data === 'keepalive') {
+                        return;
+                    }
+                    const parsed = JSON.parse(event.data);
+                    handlePageUpdate(parsed);
                 } catch (e) {
-                    console.error('Failed to parse WebSocket message:', e);
+                    console.debug('Ignored non-JSON SSE payload:', event.data);
                 }
             };
+            sse.onmessage = onSseMessage;
+            sse.addEventListener('page_update', onSseMessage);
 
-            ws.onclose = () => {
-                console.log('WebSocket closed');
+            sse.onerror = () => {
+                console.warn('SSE error/closed, falling back to polling');
                 syncJobState().finally(() => {
                     if (currentJobId) {
                         startPollingFallback();
@@ -839,14 +1281,8 @@
                 });
             };
 
-            ws.onerror = (error) => {
-                console.error('WebSocket error:', error);
-                // Fallback to polling if WebSocket fails
-                startPollingFallback();
-            };
-
             // Keep a polling safety net in case the job finishes before the
-            // WebSocket subscription receives any completion event.
+            // SSE subscription receives any completion event.
             startPollingFallback();
         }
 
@@ -854,7 +1290,7 @@
             if (!currentJobId) return;
 
             try {
-                const response = await fetch('/api/jobs/' + currentJobId, { cache: 'no-store' });
+                const response = await fetch('/api/jobs/' + encodeURIComponent(currentJobId), { cache: 'no-store' });
                 if (!response.ok) return;
 
                 const job = await response.json();
@@ -892,61 +1328,33 @@
             }
         }
 
-        function handleWebSocketMessage(msg) {
-            switch (msg.type) {
-                case 'progress': {
-                    const data = msg.data;
-                    progressFill.style.width = data.percent + '%';
-                    progressPercent.textContent = data.percent + '%';
-                    progressStep.textContent = data.step_name;
-                    if (data.total_steps > 0) {
-                        progressStepCount.textContent = 'ステップ ' + data.current_step + '/' + data.total_steps;
-                    }
-                    // Remove pulsing once progress actually moves
-                    if (data.percent > lastPercent) {
-                        progressFill.classList.remove('pulsing');
-                        lastPercent = data.percent;
-                        clearTimeout(pulseTimer);
-                        pulseTimer = setTimeout(() => progressFill.classList.add('pulsing'), 3000);
-                    }
-                    break;
-                }
-
-                case 'log': {
-                    const entry = document.createElement('div');
-                    entry.className = 'progress-log-entry' + (msg.data.message.startsWith('✓') ? ' completed' : '');
-                    entry.textContent = msg.data.message;
-                    progressLog.appendChild(entry);
-                    progressLog.scrollTop = progressLog.scrollHeight;
-                    break;
-                }
-
-                case 'status_change':
-                    console.log('Status changed:', msg.data.old_status, '->', msg.data.new_status);
-                    break;
-
-                case 'completed':
-                    closeWebSocket();
-                    showSuccess(msg.data.download_url);
-                    break;
-
-                case 'error':
-                    closeWebSocket();
-                    showError(msg.data.message);
-                    break;
-
-                case 'page_preview': {
-                    const preview = msg.data;
-                    addPreview(preview.page_number, preview.preview_base64, preview.stage);
-                    break;
-                }
+        function handlePageUpdate(update) {
+            if (!update || typeof update !== 'object') {
+                return;
             }
+            const stage = update.stage || '-';
+            const status = update.status || 'running';
+            const page = Number(update.page || 0);
+
+            progressStep.textContent = stage;
+            if (status === 'running') {
+                const current = Number(progressPercent.textContent.replace('%', '')) || 0;
+                const next = Math.min(99, current + 1);
+                progressFill.style.width = next + '%';
+                progressPercent.textContent = next + '%';
+            }
+
+            updatePageStatusRow(page, status, stage);
         }
 
         function closeWebSocket() {
             if (ws) {
                 ws.close();
                 ws = null;
+            }
+            if (sse) {
+                sse.close();
+                sse = null;
             }
             stopPollingFallback();
             if (elapsedTimer) {
@@ -964,7 +1372,7 @@
 
             pollInterval = setInterval(async () => {
                 try {
-                    const response = await fetch('/api/jobs/' + currentJobId, { cache: 'no-store' });
+                    const response = await fetch('/api/jobs/' + encodeURIComponent(currentJobId), { cache: 'no-store' });
                     const job = await response.json();
 
                     if (job.progress) {
@@ -1064,6 +1472,9 @@
             closeWebSocket();
             resetFormState();
             clearPreviews();
+            if (pageVirtualList) {
+                pageVirtualList.clear();
+            }
             resultSection.classList.remove('active');
             resultSuccess.style.display = 'none';
             resultError.style.display = 'none';

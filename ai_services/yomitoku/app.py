@@ -3,19 +3,16 @@ import time
 import asyncio
 import traceback
 import sys
+import threading
 import torch
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 # 既存のブリッジロジックをインポート（フォルダ移動済み前提）
 import yomitoku_bridge as bridge
-
-# GPU は1基想定。OCRリクエストの同時実行を抑止して OOM を防ぐ
-_GPU_SEMAPHORE: asyncio.Semaphore | None = None
 
 app = FastAPI(
     title="SuperBook AI OCR Service",
@@ -23,44 +20,83 @@ app = FastAPI(
     version="1.0.0"
 )
 
+_active_requests = 0
+_active_requests_lock = threading.Lock()
+
+
+def _inc_active_requests():
+    global _active_requests
+    with _active_requests_lock:
+        _active_requests += 1
+
+
+def _dec_active_requests():
+    global _active_requests
+    with _active_requests_lock:
+        _active_requests = max(0, _active_requests - 1)
+
+
+def _get_active_requests() -> int:
+    with _active_requests_lock:
+        return _active_requests
+
 # --- リクエストモデルの定義 ---
 class OcrRequest(BaseModel):
     input_path: str = Field(..., description="入力画像の絶対パス（コンテナ内）")
     gpu_id: Optional[int] = Field(0, description="使用するGPUデバイスID")
+    language: str = Field("jpn", description="OCR language (YomiToku currently supports Japanese)")
     confidence: float = Field(0.5, ge=0.0, le=1.0, description="確信度の閾値")
     format: str = Field("json", description="出力形式 (json, text, markdown)")
 
-# --- 起動時のウォームアップ (設計案より) ---
 @app.on_event("startup")
 async def warmup():
-    """起動時ウォームアップ。デフォルトは無効（最終実行速度優先）。"""
-    global _GPU_SEMAPHORE
-    _GPU_SEMAPHORE = asyncio.Semaphore(1)
-
+    """Startup warmup: model load only, no dummy inference."""
     if os.getenv("AI_STARTUP_WARMUP", "0").lower() not in {"1", "true", "yes", "on"}:
         print("Startup warmup is disabled (AI_STARTUP_WARMUP!=1).")
         return
 
-    print("Initializing YomiToku model and warming up GPU...")
+    print("Loading YomiToku model weights into GPU memory...")
     try:
-        # 128x128の白紙ダミー画像を作成して推論
-        import numpy as np
-        import cv2
-        dummy_img_path = Path("/tmp/ocr_warmup.png")
-        dummy_img = np.full((128, 128, 3), 255, dtype=np.uint8)
-        cv2.imwrite(str(dummy_img_path), dummy_img)
-        
-        # 最小構成で一度実行
-        await asyncio.to_thread(
-            bridge.process_image,
-            dummy_img_path,
-            "json",
-            0 if torch.cuda.is_available() else None,
-            0.5,
-        )
-        print("OCR Warmup completed successfully.")
+        device = f"cuda:0" if torch.cuda.is_available() else "cpu"
+        # Model load only — no dummy inference
+        await asyncio.to_thread(bridge.get_or_create_analyzer, device)
+        print("YomiToku model loaded successfully.")
     except Exception as e:
-        print(f"OCR Warmup failed (non-critical): {e}")
+        print(f"YomiToku model load failed (non-critical): {e}")
+
+@app.get("/status")
+async def get_status():
+    """GPU memory status and model load state."""
+    gpu_info = {}
+    memory_allocated_mb = 0.0
+    memory_reserved_mb = 0.0
+    memory_total_mb = 0.0
+    memory_free_mb = 0.0
+    if torch.cuda.is_available():
+        try:
+            memory_allocated_mb = round(torch.cuda.memory_allocated(0) / 1024**2, 1)
+            memory_reserved_mb = round(torch.cuda.memory_reserved(0) / 1024**2, 1)
+            memory_total_mb = round(torch.cuda.get_device_properties(0).total_memory / 1024**2, 1)
+            memory_free_mb = round(max(0.0, memory_total_mb - memory_reserved_mb), 1)
+            gpu_info = {
+                "device": torch.cuda.get_device_name(0),
+                "memory_allocated_mb": memory_allocated_mb,
+                "memory_reserved_mb": memory_reserved_mb,
+                "memory_total_mb": memory_total_mb,
+                "memory_free_mb": memory_free_mb,
+            }
+        except Exception:
+            gpu_info = {"error": "Failed to query GPU memory"}
+    return {
+        "service": "yomitoku-ocr",
+        "status": "running",
+        "active_requests": _get_active_requests(),
+        "gpu_memory_total": memory_total_mb,
+        "gpu_memory_used": memory_reserved_mb,
+        "gpu_memory_free": memory_free_mb,
+        "gpu": gpu_info,
+        "cuda_available": torch.cuda.is_available(),
+    }
 
 # --- API エンドポイント ---
 
@@ -90,21 +126,6 @@ async def get_version():
         "vram_total_gb": torch.cuda.get_device_properties(0).total_memory / 1e9 if (torch and torch.cuda.is_available()) else 0
     }
 
-@app.post("/cleanup")
-async def cleanup():
-    """Clean up cached models and free GPU memory."""
-    try:
-        cleaned = await asyncio.to_thread(bridge.cleanup_analyzer)
-        if cleaned:
-            return {"status": "ok", "message": "Analyzer cache cleared and GPU memory freed"}
-        return JSONResponse(
-            status_code=202,
-            content={"status": "busy", "message": "Cleanup deferred: active OCR request(s)"},
-        )
-    except Exception as e:
-        print(f"Cleanup failed: {e}", file=sys.stderr)
-        return {"status": "error", "message": str(e)}
-
 @app.post("/ocr")
 async def perform_ocr(req: OcrRequest):
     """
@@ -117,16 +138,23 @@ async def perform_ocr(req: OcrRequest):
     if not input_p.exists():
         raise HTTPException(status_code=404, detail=f"Input file not found: {req.input_path}")
 
+    normalized_language = req.language.strip().lower()
+    if normalized_language not in {"jpn", "ja", "ja-jp", "japanese"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported OCR language for YomiToku service: {req.language}",
+        )
+
+    _inc_active_requests()
     try:
         # 既存のブリッジロジックを使用して画像処理を実行 [3]
-        async with _GPU_SEMAPHORE:
-            result = await asyncio.to_thread(
-                bridge.process_image,
-                input_p,
-                "json",
-                req.gpu_id,
-                req.confidence,
-            )
+        result = await asyncio.to_thread(
+            bridge.process_image,
+            input_p,
+            "json",
+            req.gpu_id,
+            req.confidence,
+        )
 
         if result.get("exit_code") != 0:
             raise Exception(result.get("error", "Unknown error in YomiToku logic"))
@@ -155,6 +183,8 @@ async def perform_ocr(req: OcrRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _dec_active_requests()
 
 if __name__ == "__main__":
     import uvicorn

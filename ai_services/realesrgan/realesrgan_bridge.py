@@ -72,10 +72,190 @@ MODEL_MIN_BYTES = {
 
 
 # Reuse loaded upsampler instances across requests to avoid repeated model init.
+# Each cached instance has a dedicated lock because RealESRGANer is not re-entrant.
 _UPSAMPLER_CACHE = {}
 _UPSAMPLER_CACHE_LOCK = threading.Lock()
-_ACTIVE_UPSCALE_COUNT = 0
-_ACTIVE_UPSCALE_COND = threading.Condition(threading.Lock())
+_ACTIVE_INFERENCE = 0
+_ACTIVE_INFERENCE_LOCK = threading.Lock()
+_ACTIVE_INFERENCE_COND = threading.Condition(_ACTIVE_INFERENCE_LOCK)
+_MEASURED_INFERENCE_MB = 0.0
+_MEASURED_INFERENCE_SAMPLES = 0
+_MEASURED_INFERENCE_LOCK = threading.Lock()
+_POOL_SIZE_ENV_RAW = os.environ.get("REALESRGAN_POOL_SIZE", "1")
+
+
+def _parse_env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _parse_env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+_AUTO_POOL_MAX = _parse_env_int("REALESRGAN_POOL_MAX", 8)
+_GPU_SAFETY_MARGIN_MB = _parse_env_float("GPU_SAFETY_MARGIN_MB", 3000.0)
+_BOOTSTRAP_INFERENCE_MB = _parse_env_float("REALESRGAN_BOOTSTRAP_INFERENCE_MB", 0.0)
+
+
+def _configured_pool_size() -> int:
+    """Resolve configured pool size. 0 means dynamic runtime auto control."""
+    raw = _POOL_SIZE_ENV_RAW
+    try:
+        configured = int(raw)
+    except ValueError:
+        configured = 1
+    return max(0, configured)
+
+
+_CONFIGURED_POOL_SIZE = _configured_pool_size()
+
+
+def _current_per_inference_mb() -> float:
+    with _MEASURED_INFERENCE_LOCK:
+        measured = _MEASURED_INFERENCE_MB
+        samples = _MEASURED_INFERENCE_SAMPLES
+
+    if samples > 0 and measured > 0.0:
+        return max(256.0, measured)
+
+    # Bootstrap fallback before measured samples are available.
+    # The previous fixed 1200MB underestimated x4plus load and caused burst oversubscription.
+    if _BOOTSTRAP_INFERENCE_MB > 0:
+        return max(512.0, _BOOTSTRAP_INFERENCE_MB)
+
+    if torch.cuda.is_available():
+        try:
+            total_mb = torch.cuda.get_device_properties(0).total_memory / 1024**2
+            # Conservative bootstrap: around half of total VRAM on 12GB class GPUs.
+            return max(4096.0, total_mb * 0.45)
+        except Exception:
+            pass
+
+    return 4096.0
+
+
+def _current_pool_limit(gpu_id: int = 0, active_override: int | None = None) -> int:
+    # CRITICAL: RealESRGANer is NOT re-entrant. Multiple concurrent instances
+    # on the same GPU cause internal buffer corruption → "illegal memory access" errors.
+    # Force strict single-instance constraint. GPU-level concurrency is controlled
+    # by _ACTIVE_INFERENCE semaphore (multiple requests wait sequentially).
+    if _CONFIGURED_POOL_SIZE > 0:
+        return max(1, _CONFIGURED_POOL_SIZE)
+
+    # Always enforce single instance on GPU to prevent re-entrance corruption
+    return 1
+
+
+def _inc_active_inference():
+    global _ACTIVE_INFERENCE
+    with _ACTIVE_INFERENCE_LOCK:
+        _ACTIVE_INFERENCE += 1
+
+
+def _dec_active_inference():
+    global _ACTIVE_INFERENCE
+    with _ACTIVE_INFERENCE_LOCK:
+        _ACTIVE_INFERENCE = max(0, _ACTIVE_INFERENCE - 1)
+
+
+def _dec_active_inference_locked():
+    global _ACTIVE_INFERENCE
+    _ACTIVE_INFERENCE = max(0, _ACTIVE_INFERENCE - 1)
+
+
+def _update_measured_inference_mb(sample_mb: float):
+    """Update EWMA for measured per-inference VRAM usage."""
+    global _MEASURED_INFERENCE_MB, _MEASURED_INFERENCE_SAMPLES
+    if sample_mb <= 0:
+        return
+
+    with _MEASURED_INFERENCE_LOCK:
+        if _MEASURED_INFERENCE_SAMPLES == 0:
+            _MEASURED_INFERENCE_MB = sample_mb
+        else:
+            _MEASURED_INFERENCE_MB = (_MEASURED_INFERENCE_MB * 0.8) + (sample_mb * 0.2)
+        _MEASURED_INFERENCE_SAMPLES += 1
+
+
+def _begin_inference_measurement(gpu_id: int):
+    """Begin inference under runtime dynamic cap and capture optional baseline."""
+    global _ACTIVE_INFERENCE
+    with _ACTIVE_INFERENCE_COND:
+        while True:
+            cap = _current_pool_limit(gpu_id, active_override=_ACTIVE_INFERENCE)
+            if _ACTIVE_INFERENCE < cap:
+                _ACTIVE_INFERENCE += 1
+                active_now = _ACTIVE_INFERENCE
+                break
+            # Wait until another inference finishes and releases a slot.
+            _ACTIVE_INFERENCE_COND.wait(timeout=0.05)
+
+    baseline_reserved_mb = None
+    if active_now == 1 and torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize(gpu_id)
+            baseline_reserved_mb = torch.cuda.memory_reserved(gpu_id) / 1024**2
+        except Exception:
+            baseline_reserved_mb = None
+
+    return baseline_reserved_mb
+
+
+def _end_inference_measurement(gpu_id: int, baseline_reserved_mb):
+    """Finish inference and record measured VRAM delta when isolated."""
+    try:
+        if baseline_reserved_mb is not None and torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize(gpu_id)
+                end_reserved_mb = torch.cuda.memory_reserved(gpu_id) / 1024**2
+                measured_delta_mb = max(0.0, end_reserved_mb - baseline_reserved_mb)
+                _update_measured_inference_mb(measured_delta_mb)
+            except Exception:
+                pass
+    finally:
+        with _ACTIVE_INFERENCE_COND:
+            _dec_active_inference_locked()
+            _ACTIVE_INFERENCE_COND.notify_all()
+
+
+def get_runtime_stats() -> dict:
+    with _UPSAMPLER_CACHE_LOCK:
+        slot_count = sum(len(v.get("entries", [])) for v in _UPSAMPLER_CACHE.values())
+        cache_keys = len(_UPSAMPLER_CACHE)
+
+    with _ACTIVE_INFERENCE_LOCK:
+        active_inference = _ACTIVE_INFERENCE
+
+    with _MEASURED_INFERENCE_LOCK:
+        measured_inference_mb = _MEASURED_INFERENCE_MB
+        measured_inference_samples = _MEASURED_INFERENCE_SAMPLES
+
+    current_pool_limit = _current_pool_limit(0)
+
+    return {
+        "active_inference": active_inference,
+        "upsampler_pool_size": current_pool_limit,
+        "upsampler_slots": slot_count,
+        "cache_keys": cache_keys,
+        "measured_inference_mb": round(measured_inference_mb, 1),
+        "measured_inference_samples": measured_inference_samples,
+        "configured_pool_size": _CONFIGURED_POOL_SIZE,
+    }
+
+
+def _is_cuda_illegal_memory_access(err: BaseException) -> bool:
+    return "illegal memory access" in str(err).lower()
+
+
+def _is_valid_weight_file(path: Path, model_filename: str) -> bool:
+    min_bytes = MODEL_MIN_BYTES.get(model_filename, 1)
+    return path.exists() and path.stat().st_size >= min_bytes
 
 
 def download_model(model_filename: str, target_path: Path) -> bool:
@@ -125,8 +305,9 @@ def download_model(model_filename: str, target_path: Path) -> bool:
 
 def get_model(model_name: str, scale: int):
     """Load RealESRGAN model."""
-    # Determine script directory for weights path
+    # Prefer persistent cache location so model files survive container recreation.
     script_dir = Path(__file__).parent
+    cache_dir = Path.home() / ".cache" / "realesrgan"
     weights_dir = script_dir / "weights"
     
     if model_name == "realesrgan-x4plus":
@@ -165,61 +346,29 @@ def get_model(model_name: str, scale: int):
     else:
         raise ValueError(f"Unknown model: {model_name}")
     
-    # Try multiple locations for weights
-    model_path = weights_dir / model_filename
-    
-    # Also check common cache locations
-    alt_paths = [
-        Path.home() / ".cache" / "realesrgan" / model_filename,
+    model_path_candidates = [
+        cache_dir / model_filename,
+        weights_dir / model_filename,
         Path("/usr/share/realesrgan") / model_filename,
     ]
-    
-    # Find existing or download
-    if not model_path.exists():
-        for alt in alt_paths:
-            if alt.exists():
-                model_path = alt
-                break
-        else:
-            # Download to script's weights directory
-            if not download_model(model_filename, model_path):
-                raise FileNotFoundError(f"Model weights not found and download failed: {model_filename}")
+
+    model_path = None
+    for candidate in model_path_candidates:
+        if _is_valid_weight_file(candidate, model_filename):
+            model_path = candidate
+            break
+
+        if candidate.exists():
+            print(f"Corrupt/incomplete model detected, removing: {candidate}", file=sys.stderr)
+            candidate.unlink(missing_ok=True)
+
+    if model_path is None:
+        target_path = cache_dir / model_filename
+        if not download_model(model_filename, target_path):
+            raise FileNotFoundError(f"Model weights not found and download failed: {model_filename}")
+        model_path = target_path
     
     return model, netscale, str(model_path)
-
-
-def cleanup_upsampler(wait_timeout: float = 3.0) -> bool:
-    """Clean up cached upsamplers and free GPU memory.
-
-    Returns True when cleanup was executed, False when skipped because
-    active upscale requests are still running.
-    """
-    global _UPSAMPLER_CACHE
-    deadline = time.time() + wait_timeout
-    with _ACTIVE_UPSCALE_COND:
-        while _ACTIVE_UPSCALE_COUNT > 0 and time.time() < deadline:
-            _ACTIVE_UPSCALE_COND.wait(timeout=0.2)
-        if _ACTIVE_UPSCALE_COUNT > 0:
-            print(
-                f"Cleanup skipped: {_ACTIVE_UPSCALE_COUNT} active upscale request(s)",
-                file=sys.stderr,
-            )
-            return False
-
-    with _UPSAMPLER_CACHE_LOCK:
-        for key in list(_UPSAMPLER_CACHE.keys()):
-            upsampler = _UPSAMPLER_CACHE[key]
-            if hasattr(upsampler, 'model') and upsampler.model is not None:
-                upsampler.model = upsampler.model.cpu()
-                del upsampler.model
-            del _UPSAMPLER_CACHE[key]
-            print(f"UPSAMPLER cleaned: {key}", file=sys.stderr)
-        
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            print("GPU memory cache cleared", file=sys.stderr)
-
-    return True
 
 
 def get_or_create_upsampler(
@@ -229,13 +378,35 @@ def get_or_create_upsampler(
     gpu_id: int,
     fp32: bool,
 ):
-    """Get cached RealESRGANer instance or create a new one."""
+    """Get a cached RealESRGANer instance from a small round-robin pool."""
     cache_key = (model_name, scale, tile, gpu_id, fp32)
     with _UPSAMPLER_CACHE_LOCK:
         cached = _UPSAMPLER_CACHE.get(cache_key)
         if cached is not None:
-            print(f"MODEL_CACHE hit: {cache_key}", file=sys.stderr)
-            return cached
+            entries = cached["entries"]
+            pool_limit = _current_pool_limit(gpu_id)
+            if len(entries) < pool_limit:
+                model, netscale, model_path = get_model(model_name, scale)
+                upsampler = RealESRGANer(
+                    scale=netscale,
+                    model_path=model_path,
+                    model=model,
+                    tile=tile,
+                    tile_pad=10,
+                    pre_pad=0,
+                    half=not fp32,
+                    device=f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu",
+                )
+                entries.append((upsampler, threading.Lock()))
+                print(
+                    f"MODEL_CACHE expand: {cache_key} -> size={len(entries)} limit={pool_limit}",
+                    file=sys.stderr,
+                )
+
+            idx = cached["next_idx"] % len(entries)
+            cached["next_idx"] = (idx + 1) % len(entries)
+            print(f"MODEL_CACHE hit: {cache_key} slot={idx}", file=sys.stderr)
+            return entries[idx]
 
         print(f"MODEL_CACHE miss: {cache_key}", file=sys.stderr)
         model, netscale, model_path = get_model(model_name, scale)
@@ -249,8 +420,12 @@ def get_or_create_upsampler(
             half=not fp32,
             device=f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu",
         )
-        _UPSAMPLER_CACHE[cache_key] = upsampler
-        return upsampler
+        cache_entry = {
+            "entries": [(upsampler, threading.Lock())],
+            "next_idx": 0,
+        }
+        _UPSAMPLER_CACHE[cache_key] = cache_entry
+        return cache_entry["entries"][0]
 
 
 def upscale_image(
@@ -263,18 +438,16 @@ def upscale_image(
     fp32: bool = False,
 ) -> dict:
     """Upscale a single image."""
-    global _ACTIVE_UPSCALE_COUNT
     start_time = time.time()
-
-    with _ACTIVE_UPSCALE_COND:
-        _ACTIVE_UPSCALE_COUNT += 1
 
     # Calculate output scale (model scale may differ from requested scale)
     outscale = scale
 
+    cache_key = (model_name, scale, tile, gpu_id, fp32)
+
     try:
         try:
-            upsampler = get_or_create_upsampler(
+            upsampler, upsampler_lock = get_or_create_upsampler(
                 model_name=model_name,
                 scale=scale,
                 tile=tile,
@@ -293,13 +466,56 @@ def upscale_image(
 
         original_size = img.shape[:2]
 
-        try:
-            # Upscale
-            output, _ = upsampler.enhance(img, outscale=outscale)
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                return {"error": "Out of memory", "exit_code": EXIT_OOM}
-            raise
+        output = None
+        for attempt in range(2):
+            try:
+                # RealESRGANer keeps mutable buffers internally, so parallel calls to
+                # the same cached instance can corrupt outputs. Guard each instance.
+                with upsampler_lock:
+                    baseline_reserved_mb = _begin_inference_measurement(gpu_id)
+                    try:
+                        output, _ = upsampler.enhance(img, outscale=outscale)
+                    finally:
+                        _end_inference_measurement(gpu_id, baseline_reserved_mb)
+                break
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    return {"error": "Out of memory", "exit_code": EXIT_OOM}
+
+                # CUDA illegal memory access can poison current model/context.
+                # Drop cache, clear allocator if possible, and retry once.
+                if _is_cuda_illegal_memory_access(e) and attempt == 0:
+                    print(
+                        f"GPU fault detected. Reinitializing upsampler cache for {cache_key}",
+                        file=sys.stderr,
+                    )
+                    with _UPSAMPLER_CACHE_LOCK:
+                        _UPSAMPLER_CACHE.pop(cache_key, None)
+                    if torch.cuda.is_available():
+                        try:
+                            torch.cuda.empty_cache()
+                        except RuntimeError as clear_err:
+                            print(
+                                f"WARN: empty_cache failed during recovery: {clear_err}",
+                                file=sys.stderr,
+                            )
+
+                    upsampler, upsampler_lock = get_or_create_upsampler(
+                        model_name=model_name,
+                        scale=scale,
+                        tile=tile,
+                        gpu_id=gpu_id,
+                        fp32=fp32,
+                    )
+                    continue
+
+                raise
+
+        if output is None:
+            return {
+                "error": "Upscale failed without output",
+                "exit_code": EXIT_ERROR,
+            }
 
         # Save output
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -319,9 +535,13 @@ def upscale_image(
             "exit_code": EXIT_SUCCESS,
         }
     finally:
-        with _ACTIVE_UPSCALE_COND:
-            _ACTIVE_UPSCALE_COUNT = max(0, _ACTIVE_UPSCALE_COUNT - 1)
-            _ACTIVE_UPSCALE_COND.notify_all()
+        # 推論後に一時確保を解放する（構築方针 5.2）
+        # モデル自体（_UPSAMPLER_CACHE）は維持する
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except RuntimeError as e:
+                print(f"WARN: empty_cache failed: {e}", file=sys.stderr)
 
 
 def main():

@@ -1,0 +1,157 @@
+1. GPU を中心に据えた「GPU 主導パイプライン」
+普通のパイプラインは：
+
+コード
+CPU → I/O → GPU → CPU → I/O
+だが、GPU を最大活用するには逆で：
+
+コード
+GPU が空く前に次の仕事を準備しておく
+つまり：
+
+コード
+GPU ←（常にキューが満杯）
+CPU/I/O は GPU のために先回りして準備する
+Rust Core は GPU のためのワーカー管理者 として動く。
+
+2. GPU キュー（GPU Job Queue）を導入する
+✔ Rust Core はページ単位でタスクを作るが
+GPU に投げる順番は GPU キューが管理する
+
+GPU キューの役割
+GPU が空いた瞬間に次のページを渡す
+
+GPU のメモリ状況を見て「今投げていいか」を判断
+
+AI サービスの /status を見て最適なレプリカを選ぶ
+
+仕組み
+コード
+Rust Core
+  ├─ I/O → WebP 読み込み
+  ├─ CPU → 補正
+  ├─ GPU キューに投入
+GPU キュー
+  ├─ GPU が空いたら即投入
+  ├─ メモリ不足なら待機
+  └─ 推論完了後に Rust Core に返す
+3. GPU の“アイドル時間ゼロ”を実現する 3 層並列
+GPU を 100% で回すには、
+CPU / I/O / GPU の 3 層を完全に重ねる必要がある。
+
+✔ 層1：I/O（非同期 WebP 読み込み）
+次のページの WebP を読み込む
+
+CPU 補正の準備をする
+
+✔ 層2：CPU（補正・前処理）
+GPU に渡す前の画像を作る
+
+GPU が仕事を終える前に次の画像を準備
+
+✔ 層3：GPU（RealESRGAN / OCR）
+GPU キューから仕事を受け取る
+
+推論後に empty_cache でメモリ解放
+
+3 層が同時に動くとこうなる：
+コード
+GPU:   [推論中] [推論中] [推論中] [推論中]
+CPU:   [補正中] [補正中] [補正中] [補正中]
+I/O:   [読み込み] [読み込み] [読み込み] [読み込み]
+GPU が一瞬でも止まると負けなので、
+CPU と I/O が GPU の先回りをする構造が必須。
+
+4. GPU メモリに合わせた“動的並列度制御”
+GTX 3060（12GB）は RealESRGAN の負荷が重い。
+
+✔ AI サービスの /status API を使う
+返却例：
+
+json
+{
+  "gpu_memory_total": 12288,
+  "gpu_memory_used": 4800,
+  "gpu_memory_free": 7488,
+  "active_requests": 1
+}
+✔ Rust Core の判断
+gpu_memory_free > safety_margin のときだけ次のページを投げる
+
+safety_margin の例：3000MB
+
+✔ 動的制御の例
+コード
+free=8000MB → 投げてOK
+free=5000MB → 投げてOK
+free=2500MB → 投げない（待機）
+これにより OOM を完全に防ぎつつ GPU を常に満杯にできる。
+
+5. AI サービス側の GPU 最適化（3060 最適設定）
+✔ RealESRGAN
+tile = 256
+
+batch = 1
+
+fp16 = ON
+
+CUDA Stream = 必要なときだけ
+
+✔ OCR
+メモリ軽いので並列度は Rust Core 側で制御
+
+✔ 推論後に必ず empty_cache
+python
+torch.cuda.empty_cache()
+✔ workers=2（CPU 前処理の並列化）
+コード
+uvicorn app:app --workers 2
+6. GPU を最大限使うための Rust Core の並列戦略（詳細版）
+以下が GPU を 100% で回すための Rust Core の正式戦略。
+
+6.1 ページタスク生成（tokio::spawn）
+300ページなら 300タスク生成
+
+実行は GPU キューが制御
+
+6.2 非同期 I/O（WebP 読み込み）
+tokio::fs::read
+
+spawn_blocking で CPU デコード
+
+6.3 CPU 補正（correct / ocr_pre）
+GPU が仕事を終える前に次のページを準備
+
+6.4 GPU キューに投入
+/status を見て空いているレプリカを選択
+
+メモリが足りない場合は待機
+
+6.5 GPU 推論（AI サービス）
+RealESRGAN / OCR
+
+推論後に empty_cache
+
+6.6 非同期 I/O（WebP 書き込み）
+GPU 推論と重ねて実行
+
+6.7 次ページへ（GPU が空く前に準備完了）
+🏆 GPU を最大限活用するための最終結論
+あなたのパイプラインは、以下の 3 つを満たすことで GPU を 100% で回し続ける。
+
+① GPU キューによる GPU 主導パイプライン
+GPU が空く前に次の仕事を準備
+
+GPU が常に満杯の状態を維持
+
+② CPU / I/O / GPU の 3 層並列
+I/O → CPU → GPU を完全に重ねる
+
+GPU が待つ時間をゼロにする
+
+③ GPU メモリに基づく動的並列度制御
+/status API で GPU の空きメモリを監視
+
+メモリ不足時は投げない
+
+OOM を防ぎつつ最大負荷を維持

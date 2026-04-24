@@ -62,6 +62,37 @@ pub fn load_image<P: AsRef<Path>>(path: P) -> Result<DynamicImage, String> {
     image::open(path).map_err(|e| format!("Failed to load image: {}", e))
 }
 
+/// Save a dynamic image as WebP lossless (I/O optimization for 構築方針 2.1)
+///
+/// This function writes images in WebP lossless format, which provides:
+/// - 読み書き高速（PNG の 2〜5 倍）
+/// - ファイルサイズ 1/3〜1/5
+/// - AI サービス側もそのまま読める
+pub fn save_webp_lossless<P: AsRef<Path>>(img: &DynamicImage, path: P) -> Result<(), String> {
+    let path = path.as_ref();
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directory: {}", e))?;
+    }
+
+    // Save as WebP lossless
+    let output_file = std::fs::File::create(path)
+        .map_err(|e| format!("Failed to create WebP file: {}", e))?;
+    let encoder = image::codecs::webp::WebPEncoder::new_lossless(output_file);
+    encoder
+        .encode(
+            &img.to_rgba8(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| format!("Failed to encode WebP (lossless): {}", e))?;
+
+    Ok(())
+}
+
 /// Check if a path exists and is a file
 pub fn ensure_file_exists<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let path = path.as_ref();

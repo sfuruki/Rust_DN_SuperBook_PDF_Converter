@@ -61,55 +61,14 @@ superbook-pdf convert [OPTIONS] <INPUT>
 | `--margin-safety <N>` | 0.5 | 安全バッファ率 (0.0-5.0) |
 | `--aggressive-trim` | - | アグレッシブトリム (文字欠損リスクあり) |
 
-### 影除去
-
-| オプション | デフォルト | 説明 |
-|-----------|-----------|------|
-| `--shadow-removal <MODE>` | auto | 影除去モード |
-
-**モード一覧:**
-
-| 値 | 説明 |
-|----|------|
-| `none` | 影除去を行わない |
-| `auto` | 影を自動検出して除去 |
-| `left` | 左端の影のみ除去 |
-| `right` | 右端の影のみ除去 |
-| `both` | 両端の影を除去 |
-
-### マーカー除去
-
-| オプション | デフォルト | 説明 |
-|-----------|-----------|------|
-| `--remove-markers` | off | 蛍光マーカー除去を有効化 |
-| `--marker-colors <COLORS>` | yellow,pink,green,blue | 除去する色 (カンマ区切り) |
-
-指定可能な色: `yellow`, `pink`, `green`, `blue`, `orange`
-
-### ブレ補正
-
-| オプション | デフォルト | 説明 |
-|-----------|-----------|------|
-| `--deblur` | off | ブレ補正を有効化 |
-| `--deblur-algorithm <ALG>` | unsharp-mask | 使用アルゴリズム |
-
-**アルゴリズム一覧:**
-
-| 値 | 説明 | GPU |
-|----|------|-----|
-| `unsharp-mask` | Unsharp Mask (高速、ローカル処理) | 不要 |
-| `nafnet` | NAFNet AI ブレ補正 | 必要 |
-| `deblurgan-v2` | DeblurGAN-v2 AI ブレ補正 | 必要 |
-
 ### カラー補正
 
 | オプション | 説明 |
 |-----------|------|
 | `--color-correction` | グローバルカラー補正を有効化 |
 | `--internal-resolution` | 内部解像度正規化 (4960x7016) |
-| `--offset-alignment` | ページ番号オフセット調整 |
 
-> `--advanced` はこれら 3 つをまとめて有効化するショートカットです。
+> `--advanced` はこれら 2 つをまとめて有効化するショートカットです。
 
 ### パフォーマンス
 
@@ -136,6 +95,27 @@ superbook-pdf convert [OPTIONS] <INPUT>
 | `-c, --config <PATH>` | TOML 設定ファイルのパス |
 
 → 設定ファイルの詳細は [configuration.md](configuration.md) を参照
+
+### Windows PowerShell でのフル再テスト
+
+PowerShell から `docker exec ... curl --data '{...}'` を多重引用で直接書くと、JSON エスケープが壊れて AI 推論 POST が失敗しやすいです。
+
+そのため、このリポジトリではリクエスト JSON を一時ファイル化して `docker cp` + `curl --data @file` で送る方式の再テストスクリプトを用意しています。
+
+```
+./scripts/full_retest.ps1
+```
+
+このスクリプトは次を順に実行します。
+
+- 生成物の削除
+- `web_integration` テスト
+- Compose サービス起動
+- RealESRGAN / YomiToku の `/version` と `/status` 確認
+- RealESRGAN `/upscale` 実行
+- YomiToku `/ocr` 実行
+- CLI `convert` 実行
+- 生成物確認
 
 ---
 

@@ -117,38 +117,44 @@
 //!
 //! AGPL-3.0
 
-pub mod ai_bridge;
-#[cfg(feature = "web")]
-pub mod api_server;
-pub mod cache;
-pub mod cli;
-pub mod color_stats;
-pub mod config;
-pub mod deskew;
-pub mod figure_detect;
-pub mod finalize;
-pub mod image_extract;
-pub mod margin;
-pub mod markdown_gen;
-pub mod markdown_pipeline;
-pub mod normalize;
-pub mod page_number;
-pub mod parallel;
-pub mod pdf_reader;
-pub mod pdf_writer;
-pub mod pipeline;
+// Core pipeline and orchestration
+pub mod pipeline_config;
+pub mod pipeline_builder;
 pub mod progress;
-pub mod realesrgan;
-pub mod reprocess;
+pub mod runner;
+pub mod stage;
+pub mod stages;
+pub mod gpu_queue;
+pub mod cpu_queue;
+
+// CLI / config / utilities
+pub mod cli;
+pub mod config;
 pub mod util;
-pub mod vertical_detect;
+
+// Processing modules
+pub mod lib_color_stats;
+pub mod lib_deskew;
+pub mod figure_detect;
+pub mod lib_image_extract;
+pub mod lib_margin;
+pub mod lib_normalize;
+pub mod lib_page_number;
+pub mod reprocess;
+
+// AI / OCR / markdown
+pub mod ai_bridge;
+pub mod lib_markdown_renderer;
+pub mod realesrgan;
 pub mod yomitoku;
 
-// Issue #32-35: Cleanup and enhancement modules
-pub mod cleanup;
+// PDF I/O and cache
+pub mod cache;
+pub mod pdf_reader;
+pub mod pdf_writer;
 
-// Issue #36: Markdown conversion
-pub mod markdown;
+#[cfg(feature = "web")]
+pub mod api_server;
 
 // Re-exports for convenience
 pub use ai_bridge::{AiBridgeConfig, AiBridgeConfigBuilder, AiBridgeError, AiTool};
@@ -156,27 +162,40 @@ pub use ai_bridge::{AiBridgeConfig, AiBridgeConfigBuilder, AiBridgeError, AiTool
 pub use cli::ServeArgs;
 pub use cli::{
     create_page_progress_bar, create_progress_bar, create_spinner, CacheInfoArgs, Cli, Commands,
-    ConvertArgs, DeblurAlgorithmCli, ExitCode, MarkdownArgs, ReprocessArgs, ShadowRemovalMode,
-    TextDirectionCli, ValidationProviderCli,
+    ConvertArgs, ExitCode, MarkdownArgs, ReprocessArgs, TextDirectionCli, ValidationProviderCli,
+};
+pub use cli::{ApplyConfigArgs, ListConfigArgs, PreviewArgs, RunArgs};
+pub use config::{
+    CleanupTomlConfig, ConcurrencyTomlConfig, CorrectTomlConfig, LoadTomlConfig, OcrPreTomlConfig,
+    OcrTomlConfig, PipelineTomlConfig, RetryTomlConfig, SaveTomlConfig, UpscaleTomlConfig,
+    ValidationTomlConfig,
+};
+pub use runner::{PageResult, PipelineRunner, PipelineRunnerConfig, ProgressEvent, RetryConfig};
+pub use cpu_queue::{CpuDynamicLimiter, CpuQueueConfig};
+pub use stage::{PageContext, PageProcessingStatus, Stage, StageError, StageResult};
+pub use stages::{
+    CleanupStage, ColorStage, DeskewStage, LoadStage, MarkdownMergeStage, MarkdownStage,
+    MarginStage,
+    NormalizeStage, OcrStage, PageNumberStage, SaveStage, UpscaleStage, ValidationStage,
 };
 pub use config::{
-    AdvancedConfig, CleanupConfig, CliOverrides, Config, ConfigError, GeneralConfig,
-    MarkdownConfig, MarkdownValidationConfig, OcrConfig, OutputConfig, ProcessingConfig,
+    AdvancedConfig, CliOverrides, Config, ConfigError, GeneralConfig, MarkdownConfig,
+    MarkdownValidationConfig, OcrConfig, OutputConfig, ProcessingConfig,
 };
-pub use deskew::{
+pub use lib_deskew::{
     DeskewAlgorithm, DeskewError, DeskewOptions, DeskewOptionsBuilder, DeskewResult,
     ImageProcDeskewer, QualityMode, SkewDetection,
 };
-pub use image_extract::{
+pub use lib_image_extract::{
     ColorSpace, ExtractError, ExtractOptions, ExtractOptionsBuilder, ExtractedPage, ImageFormat,
     LopdfExtractor, MagickExtractor,
 };
-pub use margin::{
+pub use lib_margin::{
     ContentDetectionMode, ContentRect, GroupCropAnalyzer, GroupCropRegion, ImageMarginDetector,
     MarginDetection, MarginError, MarginOptions, MarginOptionsBuilder, Margins, PageBoundingBox,
     TrimResult, UnifiedCropRegions, UnifiedMargins,
 };
-pub use page_number::{
+pub use lib_page_number::{
     calc_group_reference_position, calc_overlap_center, find_page_number_with_fallback,
     find_page_numbers_batch, BookOffsetAnalysis, DetectedPageNumber, FallbackMatchStats,
     MatchStage, OffsetCorrection, PageNumberAnalysis, PageNumberCandidate, PageNumberError,
@@ -206,35 +225,23 @@ pub use cache::{
     should_skip_processing, CacheDigest, ProcessingCache, ProcessingResult, CACHE_EXTENSION,
     CACHE_VERSION,
 };
-pub use color_stats::{ColorAnalyzer, ColorStats, ColorStatsError, GlobalColorParam};
+pub use lib_color_stats::{ColorAnalyzer, ColorStats, ColorStatsError, GlobalColorParam};
 pub use figure_detect::{
     FigureDetectError, FigureDetectOptions, FigureDetector, FigureRegion, PageClassification,
     RegionType,
 };
-pub use finalize::{
-    FinalizeError, FinalizeOptions, FinalizeOptionsBuilder, FinalizeResult, PageFinalizer,
-};
-pub use markdown_gen::{ContentElement, MarkdownGenError, MarkdownGenerator, PageContent};
-pub use markdown_pipeline::{
-    MarkdownPipeline, MarkdownPipelineError, MarkdownPipelineResult, ProgressState,
-};
-pub use normalize::{
+pub use lib_markdown_renderer::{ContentElement, MarkdownGenError, MarkdownGenerator, PageContent};
+pub use lib_normalize::{
     ImageNormalizer, NormalizeError, NormalizeOptions, NormalizeOptionsBuilder, NormalizeResult,
     PaddingMode, PaperColor, Resampler,
 };
-pub use parallel::{
-    parallel_map, parallel_process, ParallelError, ParallelOptions, ParallelProcessor,
-    ParallelResult,
+pub use pipeline_config::{
+    calculate_optimal_chunk_size, process_in_chunks, PipelineConfig, PipelineError,
+    ProgressCallback, SilentProgress,
 };
-pub use pipeline::{
-    calculate_optimal_chunk_size, process_in_chunks, PdfPipeline, PipelineConfig, PipelineError,
-    PipelineResult, ProcessingContext, ProgressCallback, SilentProgress,
-};
+pub use pipeline_builder::build_standard_pipeline_runner;
 pub use progress::{build_progress_bar, OutputMode, ProcessingStage, ProgressTracker};
-pub use vertical_detect::{
-    detect_book_vertical_writing, detect_vertical_probability, BookVerticalResult,
-    VerticalDetectError, VerticalDetectOptions, VerticalDetectResult,
-};
+pub use gpu_queue::{GpuJobQueue, GpuQueueConfig};
 
 // Web server (optional feature)
 #[cfg(feature = "web")]

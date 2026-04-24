@@ -13,21 +13,21 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ExitCode {
-    /// 正常終了
+    /// Successful exit
     Success = 0,
-    /// 一般的なエラー
+    /// General error
     GeneralError = 1,
-    /// 引数エラー
+    /// Invalid arguments
     InvalidArgs = 2,
-    /// 入力ファイル/ディレクトリが見つからない
+    /// Input file or directory not found
     InputNotFound = 3,
-    /// 出力エラー（書き込み権限など）
+    /// Output error
     OutputError = 4,
-    /// 処理中のエラー
+    /// Processing error
     ProcessingError = 5,
-    /// GPU初期化/処理エラー
+    /// GPU initialization or processing error
     GpuError = 6,
-    /// 外部ツール（Python等）エラー
+    /// External tool error
     ExternalToolError = 7,
 }
 
@@ -74,11 +74,10 @@ impl From<ExitCode> for std::process::ExitCode {
 #[command(about = "High-quality PDF converter for scanned books")]
 #[command(after_help = r#"
 Quick Start:
-  superbook-pdf convert input.pdf -o output/           # 基本変換
-  superbook-pdf convert input.pdf -o output/ --advanced --ocr  # 高品質変換
-    superbook-pdf serve --port 8080                      # Web API起動（UIはNginx側）
-
-詳細は `superbook-pdf <COMMAND> --help` を参照
+  superbook-pdf convert input.pdf -o output/           # 蝓ｺ譛ｬ螟画鋤
+  superbook-pdf convert input.pdf -o output/ --advanced --ocr  # 鬮伜刀雉ｪ螟画鋤
+    superbook-pdf serve --port 8080                      # Web API襍ｷ蜍包ｼ・I縺ｯNginx蛛ｴ・・
+隧ｳ邏ｰ縺ｯ `superbook-pdf <COMMAND> --help` 繧貞盾辣ｧ
 "#)]
 pub struct Cli {
     #[command(subcommand)]
@@ -101,6 +100,106 @@ pub enum Commands {
     /// Start web server for browser-based conversion
     #[cfg(feature = "web")]
     Serve(ServeArgs),
+    /// Run the pipeline (PipelineRunner)
+    Run(RunArgs),
+    /// Show pipeline.toml settings
+    ListConfig(ListConfigArgs),
+    /// Apply a preset configuration file
+    ApplyConfig(ApplyConfigArgs),
+    /// Preview a single page with current settings
+    Preview(PreviewArgs),
+}
+
+// New commands: run / list-config / apply-config / preview
+
+/// `run` command arguments
+#[derive(Args, Debug)]
+#[command(after_help = r#"
+Examples:
+  superbook-pdf run input.pdf
+  superbook-pdf run input.pdf --config config/pipeline.toml
+  superbook-pdf run input.pdf --config preset-high-quality.toml -o output/
+"#)]
+pub struct RunArgs {
+    /// Input PDF file or directory
+    #[arg(value_name = "INPUT")]
+    pub input: PathBuf,
+
+    /// Output directory
+    #[arg(short = 'o', long = "output")]
+    pub output: Option<PathBuf>,
+
+    /// Path to pipeline.toml
+    #[arg(long = "config", short = 'c')]
+    pub config: Option<PathBuf>,
+
+    /// Working directory for intermediate files
+    #[arg(long = "work-dir")]
+    pub work_dir: Option<PathBuf>,
+
+    /// Max parallel pages (0 = use config)
+    #[arg(long, default_value_t = 0)]
+    pub parallel: usize,
+
+    /// Verbose level (-v, -vv, ...)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Skip files that already exist
+    #[arg(long)]
+    pub skip_existing: bool,
+
+    /// Print execution plan only
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// `list-config` command arguments
+#[derive(Args, Debug)]
+pub struct ListConfigArgs {
+    /// Config file path (default search path if omitted)
+    #[arg(long = "config", short = 'c')]
+    pub config: Option<PathBuf>,
+
+    /// Print in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `apply-config` command arguments
+#[derive(Args, Debug)]
+pub struct ApplyConfigArgs {
+    /// Preset configuration file path
+    #[arg(value_name = "PRESET")]
+    pub preset: PathBuf,
+
+    /// Output path (default: ./pipeline.toml)
+    #[arg(long = "output", short = 'o', default_value = "pipeline.toml")]
+    pub output: PathBuf,
+
+    /// Overwrite existing output file
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `preview` command arguments
+#[derive(Args, Debug)]
+pub struct PreviewArgs {
+    /// Input PDF file
+    #[arg(value_name = "INPUT")]
+    pub input: PathBuf,
+
+    /// Page number to preview (1-based)
+    #[arg(long = "page", short = 'p', default_value_t = 1)]
+    pub page: usize,
+
+    /// Path to pipeline.toml
+    #[arg(long = "config", short = 'c')]
+    pub config: Option<PathBuf>,
+
+    /// Output directory
+    #[arg(short = 'o', long = "output")]
+    pub output: Option<PathBuf>,
 }
 
 /// Arguments for the cache-info command
@@ -109,34 +208,6 @@ pub struct CacheInfoArgs {
     /// Path to the output PDF file (to show cache info)
     #[arg(value_name = "OUTPUT_PDF")]
     pub output_pdf: std::path::PathBuf,
-}
-
-/// Shadow removal mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
-pub enum ShadowRemovalMode {
-    /// No shadow removal
-    None,
-    /// Automatic detection and removal
-    #[default]
-    Auto,
-    /// Remove shadow from left edge only
-    Left,
-    /// Remove shadow from right edge only
-    Right,
-    /// Remove shadow from both edges
-    Both,
-}
-
-/// Deblur algorithm for CLI
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
-pub enum DeblurAlgorithmCli {
-    /// Unsharp mask (fast, local processing)
-    #[default]
-    UnsharpMask,
-    /// NAFNet AI deblurring (requires GPU)
-    Nafnet,
-    /// DeblurGAN-v2 AI deblurring (requires GPU)
-    DeblurganV2,
 }
 
 /// Text direction option for CLI
@@ -167,17 +238,15 @@ pub enum ValidationProviderCli {
 #[derive(Args, Debug)]
 #[command(after_help = r#"
 Examples:
-  # 基本的なMarkdown変換
+  # 蝓ｺ譛ｬ逧・↑Markdown螟画鋤
   superbook-pdf markdown input.pdf -o output/
 
-  # 外部API検証付き
+  # 螟夜ΚAPI讀懆ｨｼ莉倥″
   superbook-pdf markdown input.pdf -o output/ --validate --api-provider claude
 
-  # 縦書き指定
-  superbook-pdf markdown input.pdf -o output/ --text-direction vertical
+  # 邵ｦ譖ｸ縺肴欠螳・  superbook-pdf markdown input.pdf -o output/ --text-direction vertical
 
-  # 画像抽出なし
-  superbook-pdf markdown input.pdf -o output/ --no-extract-images
+  # 逕ｻ蜒乗歓蜃ｺ縺ｪ縺・  superbook-pdf markdown input.pdf -o output/ --no-extract-images
 "#)]
 pub struct MarkdownArgs {
     /// Input PDF file
@@ -378,20 +447,18 @@ pub struct ServeArgs {
 #[derive(clap::Args, Debug)]
 #[command(after_help = r#"
 Examples:
-  # 基本的な変換
+  # 蝓ｺ譛ｬ逧・↑螟画鋤
   superbook-pdf convert input.pdf -o output/
 
-  # AI超解像 + OCR付き高品質変換
+  # AI雜・ｧ｣蜒・+ OCR莉倥″鬮伜刀雉ｪ螟画鋤
   superbook-pdf convert input.pdf -o output/ --advanced --ocr
 
-  # GPU無効化 (CPUのみ)
+  # GPU辟｡蜉ｹ蛹・(CPU縺ｮ縺ｿ)
   superbook-pdf convert input.pdf -o output/ --no-gpu
 
-  # 最初の10ページのみテスト
-  superbook-pdf convert input.pdf -o output/ --max-pages 10
+  # 譛蛻昴・10繝壹・繧ｸ縺ｮ縺ｿ繝・せ繝・  superbook-pdf convert input.pdf -o output/ --max-pages 10
 
-  # 詳細ログ出力
-  superbook-pdf convert input.pdf -o output/ -vvv
+  # 隧ｳ邏ｰ繝ｭ繧ｰ蜃ｺ蜉・  superbook-pdf convert input.pdf -o output/ -vvv
 "#)]
 pub struct ConvertArgs {
     /// Input PDF file or directory
@@ -484,16 +551,12 @@ pub struct ConvertArgs {
     #[arg(long)]
     pub color_correction: bool,
 
-    /// Enable page number offset alignment
-    #[arg(long)]
-    pub offset_alignment: bool,
-
     /// Output height in pixels (default: 3508)
     #[arg(long, default_value_t = 3508)]
     pub output_height: u32,
 
     /// Enable advanced processing for best quality output
-    /// (includes: internal resolution normalization, color correction, offset alignment)
+    /// (includes: internal resolution normalization, color correction)
     #[arg(long)]
     pub advanced: bool,
 
@@ -523,29 +586,6 @@ pub struct ConvertArgs {
     /// Use aggressive trimming (may risk text clipping)
     #[arg(long)]
     pub aggressive_trim: bool,
-
-    // === Shadow Removal Options (Issue #33) ===
-    /// Shadow removal mode for book binding areas
-    #[arg(long, value_enum, default_value = "auto")]
-    pub shadow_removal: ShadowRemovalMode,
-
-    // === Marker Removal Options (Issue #34) ===
-    /// Enable highlighter/marker removal
-    #[arg(long)]
-    pub remove_markers: bool,
-
-    /// Colors to remove (comma-separated: yellow,pink,green,blue,orange)
-    #[arg(long, value_delimiter = ',', default_value = "yellow,pink,green,blue")]
-    pub marker_colors: Vec<String>,
-
-    // === Deblur Options (Issue #35) ===
-    /// Enable blur detection and correction
-    #[arg(long)]
-    pub deblur: bool,
-
-    /// Deblur algorithm to use
-    #[arg(long, value_enum, default_value = "unsharp-mask")]
-    pub deblur_algorithm: DeblurAlgorithmCli,
 
     // === Debug options ===
     /// Maximum pages to process (for debugging)
@@ -588,11 +628,6 @@ impl ConvertArgs {
         self.color_correction || self.advanced
     }
 
-    /// Get effective offset alignment setting (considering --advanced flag)
-    pub fn effective_offset_alignment(&self) -> bool {
-        self.offset_alignment || self.advanced
-    }
-
     /// Get effective content-aware margins setting
     pub fn effective_content_aware_margins(&self) -> bool {
         self.content_aware_margins && !self.no_content_aware_margins
@@ -632,7 +667,7 @@ pub fn create_page_progress_bar(total: u64) -> ProgressBar {
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] Page {pos}/{len} ({percent}%) - {msg}")
             .expect("Invalid progress bar template")
-            .progress_chars("█▓░"),
+            .progress_chars("#>-"),
     );
     pb
 }
@@ -648,7 +683,7 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    // TC-CLI-001: ヘルプ表示
+    // TC-CLI-001: 繝倥Ν繝苓｡ｨ遉ｺ
     #[test]
     fn test_help_display() {
         let mut cmd = Cli::command();
@@ -657,7 +692,7 @@ mod tests {
         assert!(help.contains("convert"));
     }
 
-    // TC-CLI-002: バージョン表示
+    // TC-CLI-002: 繝舌・繧ｸ繝ｧ繝ｳ陦ｨ遉ｺ
     #[test]
     fn test_version_display() {
         let cmd = Cli::command();
@@ -665,7 +700,7 @@ mod tests {
         assert!(!version.is_empty());
     }
 
-    // TC-CLI-003: 入力ファイルなしエラー
+    // TC-CLI-003: 蜈･蜉帙ヵ繧｡繧､繝ｫ縺ｪ縺励お繝ｩ繝ｼ
     #[test]
     fn test_missing_input_error() {
         let result = Cli::try_parse_from(["superbook-pdf", "convert"]);
@@ -674,16 +709,14 @@ mod tests {
         assert!(err.to_string().contains("required"));
     }
 
-    // TC-CLI-004: 存在しないファイルエラー（パース時はエラーにならない、実行時にチェック）
-    #[test]
+    // TC-CLI-004: 蟄伜惠縺励↑縺・ヵ繧｡繧､繝ｫ繧ｨ繝ｩ繝ｼ・医ヱ繝ｼ繧ｹ譎ゅ・繧ｨ繝ｩ繝ｼ縺ｫ縺ｪ繧峨↑縺・∝ｮ溯｡梧凾縺ｫ繝√ぉ繝・け・・    #[test]
     fn test_nonexistent_file_parse() {
         // Note: CLI parsing accepts any path, existence check is at runtime
         let result = Cli::try_parse_from(["superbook-pdf", "convert", "/nonexistent/file.pdf"]);
         assert!(result.is_ok()); // Parsing succeeds
     }
 
-    // TC-CLI-005: オプション解析
-    #[test]
+    // TC-CLI-005: 繧ｪ繝励す繝ｧ繝ｳ隗｣譫・    #[test]
     fn test_option_parsing() {
         let cli = Cli::try_parse_from([
             "superbook-pdf",
@@ -707,7 +740,7 @@ mod tests {
         }
     }
 
-    // TC-CLI-006: デフォルト値
+    // TC-CLI-006: 繝・ヵ繧ｩ繝ｫ繝亥､
     #[test]
     fn test_default_values() {
         let cli = Cli::try_parse_from(["superbook-pdf", "convert", "input.pdf"]).unwrap();
@@ -774,7 +807,7 @@ mod tests {
 
         for i in 0..10 {
             pb.set_position(i);
-            pb.set_message(format!("page_{}.png", i));
+            pb.set_message(format!("page_{}.webp", i));
         }
         pb.finish_with_message("All pages processed");
     }
@@ -1276,10 +1309,10 @@ mod tests {
     #[test]
     fn test_path_with_unicode() {
         let cli =
-            Cli::try_parse_from(["superbook-pdf", "convert", "/パス/日本語/ドキュメント.pdf"])
+            Cli::try_parse_from(["superbook-pdf", "convert", "/繝代せ/譌･譛ｬ隱・繝峨く繝･繝｡繝ｳ繝・pdf"])
                 .unwrap();
         if let Commands::Convert(args) = cli.command {
-            assert!(args.input.to_string_lossy().contains("日本語"));
+            assert!(args.input.to_string_lossy().contains("譌･譛ｬ隱・"));
         }
     }
 
@@ -1446,8 +1479,8 @@ mod tests {
 
     #[test]
     fn test_spinner_unicode_message() {
-        let spinner = create_spinner("処理中... 🔄");
-        assert!(spinner.message().contains("処理中"));
+        let spinner = create_spinner("蜃ｦ逅・ｸｭ... 売");
+        assert!(spinner.message().contains("蜃ｦ逅・ｸｭ"));
     }
 
     #[test]
@@ -1455,7 +1488,7 @@ mod tests {
         let pb = create_page_progress_bar(1);
         assert_eq!(pb.length(), Some(1));
         pb.set_position(0);
-        pb.set_message("page_0.png");
+        pb.set_message("page_0.webp");
         pb.finish_with_message("Done");
     }
 
@@ -1977,7 +2010,7 @@ mod tests {
     fn test_path_with_special_characters() {
         let paths = [
             "file with spaces.pdf",
-            "日本語ファイル.pdf",
+            "譌･譛ｬ隱槭ヵ繧｡繧､繝ｫ.pdf",
             "file-with-dashes.pdf",
             "file_with_underscores.pdf",
         ];
@@ -2042,21 +2075,6 @@ mod tests {
     }
 
     #[test]
-    fn test_offset_alignment_flag() {
-        let cli = Cli::try_parse_from([
-            "superbook-pdf",
-            "convert",
-            "input.pdf",
-            "--offset-alignment",
-        ])
-        .unwrap();
-        if let Commands::Convert(args) = cli.command {
-            assert!(args.offset_alignment);
-            assert!(args.effective_offset_alignment());
-        }
-    }
-
-    #[test]
     fn test_output_height_default() {
         let cli = Cli::try_parse_from(["superbook-pdf", "convert", "input.pdf"]).unwrap();
         if let Commands::Convert(args) = cli.command {
@@ -2087,7 +2105,6 @@ mod tests {
             assert!(args.advanced);
             assert!(args.effective_internal_resolution());
             assert!(args.effective_color_correction());
-            assert!(args.effective_offset_alignment());
         }
     }
 
@@ -2116,10 +2133,8 @@ mod tests {
             assert!(!args.advanced);
             assert!(!args.internal_resolution);
             assert!(!args.color_correction);
-            assert!(!args.offset_alignment);
             assert!(!args.effective_internal_resolution());
             assert!(!args.effective_color_correction());
-            assert!(!args.effective_offset_alignment());
         }
     }
 

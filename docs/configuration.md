@@ -37,17 +37,6 @@ deskew = true
 # カラー補正
 color_correction = true
 
-# 影除去
-shadow_removal = "auto"
-
-# マーカー除去
-remove_markers = false
-marker_colors = ["yellow", "pink", "green", "blue"]
-
-# ブレ補正
-deblur = false
-deblur_algorithm = "unsharp-mask"
-
 # パフォーマンス
 chunk_size = 0
 ```
@@ -80,16 +69,6 @@ chunk_size = 0
 |-----------|-----|-----------|------|
 | `deskew` | bool | true | 傾き補正 |
 | `color_correction` | bool | true | カラー補正 |
-
-### クリーンアップ
-
-| パラメータ | 型 | デフォルト | 説明 |
-|-----------|-----|-----------|------|
-| `shadow_removal` | string | "auto" | 影除去モード |
-| `remove_markers` | bool | false | マーカー除去 |
-| `marker_colors` | array | ["yellow","pink","green","blue"] | 除去する色 |
-| `deblur` | bool | false | ブレ補正 |
-| `deblur_algorithm` | string | "unsharp-mask" | ブレ補正アルゴリズム |
 
 ### パフォーマンス
 

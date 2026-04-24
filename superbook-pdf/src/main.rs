@@ -8,32 +8,15 @@ use std::path::PathBuf;
 use std::time::Instant;
 use superbook_pdf::ai_bridge::{AiBridge, AiTool, HttpApiBridge};
 use superbook_pdf::{
-    exit_codes,
-    should_skip_processing,
-    // Cache module
-    CacheDigest,
-    // CLI
-    CacheInfoArgs,
-    Cli,
-    // Config
-    CliOverrides,
-    Commands,
-    Config,
-    ConvertArgs,
-    MarkdownArgs,
-    // Markdown pipeline
-    MarkdownPipeline,
-    // Reprocess
-    PageStatus,
-    // Pipeline
-    PdfPipeline,
-    ProcessingCache,
-    ProgressCallback,
-    // Progress tracking
-    ProgressTracker,
-    ReprocessArgs,
-    ReprocessOptions,
-    ReprocessState,
+    build_standard_pipeline_runner,
+    exit_codes, should_skip_processing, ApplyConfigArgs,
+    CacheDigest, CacheInfoArgs, CleanupStage, Cli, CliOverrides, ColorStage, Commands, Config,
+    ConvertArgs, DeskewStage, ListConfigArgs, LoadStage, MarginStage, MarkdownArgs,
+    MarkdownMergeStage, MarkdownStage, NormalizeStage, OcrStage, PageNumberStage, SaveStage,
+    PageStatus, PdfWriterOptions, PipelineRunner, PipelineRunnerConfig, PipelineTomlConfig,
+    PreviewArgs, PrintPdfWriter, ProcessingResult, ProgressCallback, ProgressEvent,
+    ProgressTracker, ReprocessArgs, ReprocessOptions, ReprocessState, RetryConfig, RunArgs,
+    ProcessingCache, UpscaleStage, ValidationStage, GpuJobQueue, GpuQueueConfig,
 };
 
 #[cfg(feature = "web")]
@@ -65,6 +48,10 @@ async fn main() {
         Commands::CacheInfo(args) => run_cache_info(&args),
         #[cfg(feature = "web")]
         Commands::Serve(args) => run_serve(&args).await,
+        Commands::Run(args) => run_pipeline(&args).await,
+        Commands::ListConfig(args) => run_list_config(&args),
+        Commands::ApplyConfig(args) => run_apply_config(&args),
+        Commands::Preview(args) => run_preview(&args).await,
     };
 
     std::process::exit(match result {
@@ -84,10 +71,6 @@ struct VerboseProgress {
 }
 
 impl VerboseProgress {
-    fn new(verbose_level: u32) -> Self {
-        Self { verbose_level }
-    }
-
     /// Check if step messages should be shown (level >= 1)
     #[allow(dead_code)]
     fn should_show_steps(&self) -> bool {
@@ -191,11 +174,9 @@ async fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error
     });
     pipeline_config.override_work_dir = work_dir.clone();
 
-    let pipeline = PdfPipeline::new(pipeline_config);
-
     // ドライラン（実行計画の表示）モード [3, 4]
     if args.dry_run {
-        print_execution_plan(args, &pdf_files, pipeline.config());
+        print_execution_plan(args, &pdf_files, &pipeline_config);
         return Ok(());
     }
 
@@ -205,8 +186,7 @@ async fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error
         std::fs::create_dir_all(wd)?;
     };
     let verbose = args.verbose > 0;
-    let progress = VerboseProgress::new(args.verbose.into());
-    let options_json = pipeline.config().to_json();
+    let options_json = pipeline_config.to_json();
 
     // 処理結果のカウント用変数
     let mut ok_count = 0usize;
@@ -215,7 +195,7 @@ async fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error
 
     // 非同期ループ内で実行
     for (idx, pdf_path) in pdf_files.iter().enumerate() {
-        let output_pdf = pipeline.get_output_path(pdf_path, &output_dir);
+        let output_pdf = output_path_from_input(pdf_path, &output_dir);
 
         // キャッシュによるスキップ判定 [3]
         if args.skip_existing && !args.force {
@@ -257,32 +237,164 @@ async fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error
             );
         }
 
-        // パイプライン処理の実行 [3, 6]
-        // 注: 内部で HTTP リクエストが発生するため、この block_on 内で実行される必要があります
-        match pipeline
-            .process_with_progress(pdf_path, &output_dir, &progress)
-            .await
-        {
-            Ok(result) => {
+        // === 新実行経路: PipelineRunner + Stage trait ===
+        let page_start = Instant::now();
+
+        // ページ数取得（pdfinfo 利用; 失敗時はエラー扱い）
+        let total_pages = match probe_pdf_page_count(pdf_path) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Error getting page count for {}: {}", pdf_path.display(), e);
+                error_count += 1;
+                continue;
+            }
+        };
+        let actual_pages = args.max_pages.map(|m| m.min(total_pages)).unwrap_or(total_pages);
+
+        if verbose {
+            println!("  Pages: {}", actual_pages);
+        }
+
+        // ファイルごとの作業ディレクトリ
+        let pdf_stem = pdf_path.file_stem().unwrap_or_default().to_string_lossy();
+        let file_work_base = match &work_dir {
+            Some(wd) => wd.join(pdf_stem.as_ref()),
+            None => output_dir.join("_work").join(pdf_stem.as_ref()),
+        };
+        std::fs::create_dir_all(&file_work_base)?;
+
+        let verbose_level = args.verbose;
+        let queue_cfg = GpuQueueConfig {
+            max_in_flight: 1,
+            safety_margin_mb: 3000,
+            status_poll_ms: 100,
+        };
+        let upscale_url = std::env::var("REALESRGAN_API_URL")
+            .unwrap_or_else(|_| "http://localhost:8000".to_string());
+        let ocr_url = std::env::var("YOMITOKU_API_URL")
+            .unwrap_or_else(|_| "http://localhost:8000".to_string());
+        let upscale_queue = GpuJobQueue::new("upscale", upscale_url, queue_cfg.clone());
+        let ocr_queue = GpuJobQueue::new("ocr", ocr_url, queue_cfg);
+        let runner = PipelineRunner::new(PipelineRunnerConfig {
+            max_parallel_pages: args.thread_count(),
+            cpu_min_parallel_pages: 1,
+            cpu_target_load_per_core: 0.9,
+            cpu_status_poll_ms: 200,
+            work_base_dir: file_work_base.clone(),
+            retry: RetryConfig::default(),
+        })
+        .add_stage(LoadStage::new(pdf_path.clone(), args.dpi))
+        .add_stage(DeskewStage::new(args.effective_deskew(), 0.8))
+        .add_stage(ColorStage::new(args.effective_color_correction()))
+        .add_stage(UpscaleStage::new(
+            2,
+            "realesrgan-x4plus".to_string(),
+            args.effective_upscale(),
+            256,
+            false,
+            upscale_queue,
+        ))
+        .add_stage(MarginStage::new(args.margin_trim > 0.0))
+        .add_stage(NormalizeStage::new(args.effective_internal_resolution()))
+        .add_stage(PageNumberStage::new(true))
+        .add_stage(OcrStage::new(
+            args.ocr,
+            "jpn".to_string(),
+            0.5,
+            "json".to_string(),
+            ocr_queue,
+        ))
+        .add_stage(SaveStage::new(
+            output_dir.clone(),
+            args.output_height,
+            args.jpeg_quality,
+        ))
+        .add_stage(ValidationStage::new(false, 0))
+        .add_stage(CleanupStage::new(false)); // PDF組み立て後に手動削除
+
+        let page_results = runner
+            .run_all(
+                actual_pages,
+                Some(std::sync::Arc::new(move |event: ProgressEvent| {
+                    if verbose_level > 0 {
+                        println!(
+                            "  [{}/{}] Page {} - {}",
+                            event.completed, event.total, event.page_id, event.stage
+                        );
+                    }
+                })),
+            )
+            .await;
+
+        let ok_pages = page_results.iter().filter(|r| r.success).count();
+        let fail_pages = page_results.len() - ok_pages;
+
+        if fail_pages > 0 {
+            eprintln!(
+                "Error: {} pages failed in {}",
+                fail_pages,
+                pdf_path.display()
+            );
+            error_count += 1;
+            std::fs::remove_dir_all(&file_work_base).ok();
+            continue;
+        }
+
+        // 処理済みページ画像を順番に収集
+        let page_images: Vec<PathBuf> = (0..actual_pages)
+            .map(|i| file_work_base.join(format!("{:04}", i)).join("gaozou.webp"))
+            .filter(|p| p.exists())
+            .collect();
+
+        if page_images.is_empty() {
+            eprintln!(
+                "Error: No page images found after processing {}",
+                pdf_path.display()
+            );
+            error_count += 1;
+            std::fs::remove_dir_all(&file_work_base).ok();
+            continue;
+        }
+
+        // 最終 PDF を組み立て
+        let pdf_opts = PdfWriterOptions::builder()
+            .dpi(args.dpi)
+            .jpeg_quality(args.jpeg_quality)
+            .build();
+        match PrintPdfWriter::create_from_images(&page_images, &output_pdf, &pdf_opts) {
+            Ok(()) => {
+                let elapsed_s = page_start.elapsed().as_secs_f64();
+                let output_size = std::fs::metadata(&output_pdf)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
                 ok_count += 1;
                 // 処理成功後のキャッシュ保存 [3]
                 if let Ok(digest) = CacheDigest::new(pdf_path, &options_json) {
-                    let cache_result = result.to_cache_result();
+                    let cache_result = ProcessingResult::new(
+                        actual_pages,
+                        None,
+                        false,
+                        elapsed_s,
+                        output_size,
+                    );
                     let cache = ProcessingCache::new(digest, cache_result);
                     let _ = cache.save(&output_pdf);
                 }
                 if verbose {
                     println!(
                         " Completed: {} pages, {:.2}s, {} bytes",
-                        result.page_count, result.elapsed_seconds, result.output_size
+                        actual_pages, elapsed_s, output_size
                     );
                 }
             }
             Err(e) => {
-                eprintln!("Error processing {}: {}", pdf_path.display(), e);
+                eprintln!("Error assembling PDF for {}: {}", pdf_path.display(), e);
                 error_count += 1;
             }
         }
+
+        // 作業ディレクトリを削除
+        std::fs::remove_dir_all(&file_work_base).ok();
     }
 
     let elapsed = start_time.elapsed();
@@ -315,8 +427,6 @@ async fn run_markdown(args: &MarkdownArgs) -> Result<(), Box<dyn std::error::Err
     }
 
     let verbose = args.verbose > 0;
-    let progress = VerboseProgress::new(args.verbose.into());
-
     if verbose {
         println!("Markdown変換開始: {}", args.input.display());
         println!("出力先: {}", args.output.display());
@@ -325,31 +435,94 @@ async fn run_markdown(args: &MarkdownArgs) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    let pipeline = MarkdownPipeline::from_args(args);
+    std::fs::create_dir_all(&args.output)?;
 
-    match pipeline
-        .run(&args.input, &args.output, args.resume, &progress)
-        .await
-    {
-        Ok(result) => {
-            let elapsed = start_time.elapsed();
+    let total_pages = probe_pdf_page_count(&args.input)?;
+    let page_count = args.max_pages.map(|m| m.min(total_pages)).unwrap_or(total_pages);
+    let work_base = args.output.join("_work_markdown");
+    std::fs::create_dir_all(&work_base)?;
 
-            if !args.quiet {
-                println!();
-                println!("=== Markdown変換完了 ===");
-                println!("ページ数: {}", result.page_count);
-                println!("画像数:   {}", result.images_count);
-                println!("出力:     {}", result.output_path.display());
-                println!("処理時間: {:.2}s", elapsed.as_secs_f64());
-            }
+    let title = args
+        .input
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            Err(e.into())
-        }
+    let runner = PipelineRunner::new(PipelineRunnerConfig {
+        // markdown_merge を安全に最終ページで実行するため逐次実行
+        max_parallel_pages: 1,
+        cpu_min_parallel_pages: 1,
+        cpu_target_load_per_core: 0.9,
+        cpu_status_poll_ms: 200,
+        work_base_dir: work_base.clone(),
+        retry: RetryConfig::default(),
+    });
+    let queue_cfg = GpuQueueConfig {
+        max_in_flight: 1,
+        safety_margin_mb: 3000,
+        status_poll_ms: 100,
+    };
+    let upscale_url = std::env::var("REALESRGAN_API_URL")
+        .unwrap_or_else(|_| "http://localhost:8000".to_string());
+    let ocr_url = std::env::var("YOMITOKU_API_URL")
+        .unwrap_or_else(|_| "http://localhost:8000".to_string());
+    let upscale_queue = GpuJobQueue::new("upscale", upscale_url, queue_cfg.clone());
+    let ocr_queue = GpuJobQueue::new("ocr", ocr_url, queue_cfg);
+    let runner = runner
+    .add_stage(LoadStage::new(args.input.clone(), args.dpi))
+    .add_stage(DeskewStage::new(args.effective_deskew(), 0.8))
+    .add_stage(UpscaleStage::new(
+        2,
+        "realesrgan-x4plus",
+        args.upscale,
+        256,
+        false,
+        upscale_queue,
+    ))
+    .add_stage(PageNumberStage::new(args.include_page_numbers))
+    .add_stage(OcrStage::new(true, "jpn", 0.5, "json", ocr_queue))
+    .add_stage(MarkdownStage::new(
+        args.output.clone(),
+        args.include_page_numbers,
+    ))
+    .add_stage(MarkdownMergeStage::new(
+        args.output.clone(),
+        title,
+        page_count,
+    ))
+    .add_stage(CleanupStage::new(false));
+
+    let verbose_level = args.verbose;
+    let page_results = runner
+        .run_all(
+            page_count,
+            Some(std::sync::Arc::new(move |event: ProgressEvent| {
+                if verbose_level > 0 {
+                    println!(
+                        "  [{}/{}] Page {} - {}",
+                        event.completed, event.total, event.page_id, event.stage
+                    );
+                }
+            })),
+        )
+        .await;
+
+    let fail_pages = page_results.iter().filter(|r| !r.success).count();
+    if fail_pages > 0 {
+        return Err(format!("Markdown conversion failed on {} pages", fail_pages).into());
     }
+
+    if !args.quiet {
+        let elapsed = start_time.elapsed();
+        println!();
+        println!("=== Markdown変換完了 ===");
+        println!("ページ数: {}", page_count);
+        println!("出力:     {}", args.output.display());
+        println!("処理時間: {:.2}s", elapsed.as_secs_f64());
+    }
+
+    Ok(())
 }
 
 // ============ Helper Functions ============
@@ -407,9 +580,6 @@ fn create_cli_overrides(args: &ConvertArgs) -> CliOverrides {
     if args.color_correction || args.advanced {
         overrides.color_correction = Some(true);
     }
-    if args.offset_alignment || args.advanced {
-        overrides.offset_alignment = Some(true);
-    }
 
     // Output height: only set if changed from default
     if args.output_height != DEFAULT_OUTPUT_HEIGHT {
@@ -425,24 +595,6 @@ fn create_cli_overrides(args: &ConvertArgs) -> CliOverrides {
     overrides.max_pages = args.max_pages;
     if args.save_debug {
         overrides.save_debug = Some(true);
-    }
-
-    // Shadow removal: override if not default (auto)
-    let shadow_mode = format!("{:?}", args.shadow_removal).to_lowercase();
-    if shadow_mode != "auto" {
-        overrides.shadow_removal = Some(shadow_mode);
-    }
-
-    // Marker removal: override if explicitly enabled
-    if args.remove_markers {
-        overrides.remove_markers = Some(true);
-        overrides.marker_colors = Some(args.marker_colors.clone());
-    }
-
-    // Deblur: override if explicitly enabled
-    if args.deblur {
-        overrides.deblur = Some(true);
-        overrides.deblur_algorithm = Some(format!("{:?}", args.deblur_algorithm).to_lowercase());
     }
 
     overrides
@@ -468,6 +620,11 @@ fn collect_pdf_files(input: &PathBuf) -> Result<Vec<PathBuf>, Box<dyn std::error
     }
 
     Ok(pdf_files)
+}
+
+fn output_path_from_input(input: &std::path::Path, output_dir: &std::path::Path) -> PathBuf {
+    let pdf_name = input.file_stem().unwrap_or_default().to_string_lossy();
+    output_dir.join(format!("{}_superbook.pdf", pdf_name))
 }
 
 /// Print execution plan for dry-run mode
@@ -501,19 +658,10 @@ fn print_execution_plan(
     } else {
         println!("  4. AI Upscaling: DISABLED");
     }
-    if config.shadow_removal != "none" {
-        println!(
-            "  4a. Shadow Removal (mode: {}): ENABLED",
-            config.shadow_removal
-        );
-    }
     if config.ocr {
         println!("  5. OCR (YomiToku): ENABLED");
     } else {
         println!("  5. OCR: DISABLED");
-    }
-    if config.deblur {
-        println!("  5a. Deblur ({}): ENABLED", config.deblur_algorithm);
     }
     if config.internal_resolution {
         println!("  6. Internal Resolution Normalization (4960x7016): ENABLED");
@@ -521,17 +669,8 @@ fn print_execution_plan(
     if config.color_correction {
         println!("  7. Global Color Correction: ENABLED");
     }
-    if config.remove_markers {
-        println!(
-            "  7a. Marker Removal (colors: {}): ENABLED",
-            config.marker_colors.join(", ")
-        );
-    }
-    if config.offset_alignment {
-        println!("  8. Page Number Offset Alignment: ENABLED");
-    }
     println!(
-        "  9. PDF Generation (output height: {})",
+        "  8. PDF Generation (output height: {})",
         config.output_height
     );
     println!();
@@ -1096,6 +1235,11 @@ async fn run_serve(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         .with_bind(&args.bind)
         .with_upload_limit(args.upload_limit * 1024 * 1024);
 
+    // WorkerPool の並列数は pipeline.toml の concurrency.job_parallel を正とする。
+    // 設定不在時は PipelineTomlConfig のデフォルト値にフォールバックする。
+    let toml_config = PipelineTomlConfig::load().unwrap_or_default();
+    config.workers = toml_config.resolved_job_parallel();
+
     // Configure CORS
     if args.no_cors {
         config = config.with_cors_disabled();
@@ -1203,5 +1347,221 @@ mod tests {
         // Default on_warning should print to stderr — verify it doesn't panic
         let progress = MinimalProgress;
         progress.on_warning("test default warning");
+    }
+}
+
+// ============ New Pipeline Commands (Stage-based architecture) ============
+
+/// `run` command handler: Build PipelineRunner and process PDF
+async fn run_pipeline(args: &RunArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Load pipeline.toml config
+    let toml_config = match &args.config {
+        Some(path) => PipelineTomlConfig::load_from_path(path)?,
+        None => PipelineTomlConfig::load().unwrap_or_default(),
+    };
+
+    if args.dry_run {
+        println!("=== Dry Run ===");
+        println!("Input: {}", args.input.display());
+        println!("Config: {:?}", args.config);
+        println!("{}", toml_config.to_toml()?);
+        return Ok(());
+    }
+
+    if !args.input.exists() {
+        return Err(format!("Input not found: {}", args.input.display()).into());
+    }
+
+    let output_dir = args.output.clone().unwrap_or_else(|| PathBuf::from("./output"));
+    std::fs::create_dir_all(&output_dir)?;
+
+    let work_base = args.work_dir.clone().unwrap_or_else(|| PathBuf::from("./data/work"));
+    std::fs::create_dir_all(&work_base)?;
+
+    // Get page count via pdftoppm probe
+    let page_count = probe_pdf_page_count(&args.input)?;
+    if args.verbose > 0 {
+        println!("PDF pages: {}", page_count);
+    }
+
+    let max_parallel = if args.parallel > 0 {
+        args.parallel
+    } else {
+        toml_config.resolved_page_parallel()
+    };
+
+    let runner = build_standard_pipeline_runner(
+        PipelineRunnerConfig {
+        max_parallel_pages: max_parallel,
+        cpu_min_parallel_pages: toml_config.resolved_cpu_dynamic_min_parallel(),
+        cpu_target_load_per_core: toml_config.resolved_cpu_target_load_per_core(),
+        cpu_status_poll_ms: toml_config.resolved_cpu_status_poll_ms(),
+        work_base_dir: work_base.clone(),
+        retry: RetryConfig {
+            max_attempts: toml_config.retry.max_attempts,
+            backoff_ms: toml_config.retry.backoff_ms,
+        },
+        },
+        args.input.clone(),
+        output_dir.clone(),
+        &toml_config,
+    );
+
+    let verbose = args.verbose;
+    let results = runner
+        .run_all(
+            page_count,
+            Some(std::sync::Arc::new(move |event| {
+                if verbose > 0 {
+                    println!("[Progress] {:?}", event);
+                }
+            })),
+        )
+        .await;
+
+    let ok = results.iter().filter(|r| r.success).count();
+    let fail = results.len() - ok;
+    println!("Completed: {}/{} pages ({} failed)", ok, results.len(), fail);
+
+    if fail > 0 {
+        return Err(format!("{} pages failed", fail).into());
+    }
+
+    if toml_config.cleanup.enable {
+        if let Err(e) = std::fs::remove_dir_all(&work_base) {
+            eprintln!("Warning: failed to cleanup work directory {}: {}", work_base.display(), e);
+        }
+    }
+
+    Ok(())
+}
+
+/// `list-config` command handler: Show pipeline.toml settings
+fn run_list_config(args: &ListConfigArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let config = match &args.config {
+        Some(path) => PipelineTomlConfig::load_from_path(path)?,
+        None => PipelineTomlConfig::load().unwrap_or_default(),
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&config)?);
+    } else {
+        println!("{}", config.to_toml()?);
+    }
+    Ok(())
+}
+
+/// `apply-config` command handler: Copy a preset config to pipeline.toml
+fn run_apply_config(args: &ApplyConfigArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if !args.preset.exists() {
+        return Err(format!("Preset not found: {}", args.preset.display()).into());
+    }
+    if args.output.exists() && !args.force {
+        return Err(format!(
+            "Output already exists: {}. Use --force to overwrite.",
+            args.output.display()
+        ).into());
+    }
+    std::fs::copy(&args.preset, &args.output)?;
+    println!("Applied: {} -> {}", args.preset.display(), args.output.display());
+    Ok(())
+}
+
+/// `preview` command handler: Process a single page and show result
+async fn run_preview(args: &PreviewArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if !args.input.exists() {
+        return Err(format!("Input not found: {}", args.input.display()).into());
+    }
+
+    let toml_config = match &args.config {
+        Some(path) => PipelineTomlConfig::load_from_path(path)?,
+        None => PipelineTomlConfig::load().unwrap_or_default(),
+    };
+
+    let output_dir = args.output.clone().unwrap_or_else(|| PathBuf::from("./preview_out"));
+    std::fs::create_dir_all(&output_dir)?;
+
+    let work_base = PathBuf::from("./data/work_preview");
+    std::fs::create_dir_all(&work_base)?;
+
+    println!("Previewing page {} of {}", args.page, args.input.display());
+
+    let queue_cfg = GpuQueueConfig {
+        max_in_flight: toml_config.resolved_gpu_stage_parallel(),
+        safety_margin_mb: toml_config.resolved_gpu_safety_margin_mb(),
+        status_poll_ms: toml_config.resolved_gpu_status_poll_ms(),
+    };
+    let upscale_url = std::env::var("REALESRGAN_API_URL")
+        .unwrap_or_else(|_| "http://localhost:8000".to_string());
+    let upscale_queue = GpuJobQueue::new("upscale", upscale_url, queue_cfg);
+
+    let runner = PipelineRunner::new(PipelineRunnerConfig {
+        max_parallel_pages: 1,
+        cpu_min_parallel_pages: 1,
+        cpu_target_load_per_core: toml_config.resolved_cpu_target_load_per_core(),
+        cpu_status_poll_ms: toml_config.resolved_cpu_status_poll_ms(),
+        work_base_dir: work_base,
+        retry: RetryConfig {
+            max_attempts: toml_config.retry.max_attempts,
+            backoff_ms: toml_config.retry.backoff_ms,
+        },
+    })
+    .add_stage(LoadStage::new(args.input.clone(), toml_config.load.dpi))
+    .add_stage(DeskewStage::new(
+        toml_config.correct.enable,
+        toml_config.correct.deskew_strength,
+    ))
+    .add_stage(ColorStage::new(toml_config.correct.color_correction))
+    .add_stage(UpscaleStage::new(
+        toml_config.upscale.scale,
+        toml_config.upscale.model.clone(),
+        toml_config.upscale.enable,
+        toml_config.upscale.tile,
+        toml_config.upscale.fp32,
+        upscale_queue,
+    ))
+    .add_stage(MarginStage::new(toml_config.ocr_pre.margin_trim))
+    .add_stage(NormalizeStage::new(toml_config.ocr_pre.normalize_resolution))
+    .add_stage(PageNumberStage::new(false))
+    .add_stage(SaveStage::new(
+        output_dir.clone(),
+        toml_config.save.output_height,
+        toml_config.save.jpeg_quality,
+    ))
+    .add_stage(CleanupStage::new(false));
+
+    // Run just the target page (0-indexed)
+    let page_idx = args.page.saturating_sub(1);
+    let results = runner.run_all(page_idx + 1, None).await;
+
+    if let Some(last) = results.last() {
+        if last.success {
+            println!("Preview saved to: {}", output_dir.display());
+        } else {
+            return Err(format!("Preview failed: {:?}", last.error).into());
+        }
+    }
+    Ok(())
+}
+
+/// Probe PDF page count using pdftoppm
+fn probe_pdf_page_count(pdf_path: &PathBuf) -> Result<usize, Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("pdfinfo")
+        .arg(pdf_path)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if line.starts_with("Pages:") {
+                    if let Some(n) = line.split_whitespace().nth(1) {
+                        return n.parse::<usize>().map_err(|e| e.into());
+                    }
+                }
+            }
+            Err("Could not parse page count from pdfinfo".into())
+        }
+        _ => Err("pdfinfo not available. Install poppler-utils.".into()),
     }
 }

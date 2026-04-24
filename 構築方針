@@ -1,146 +1,536 @@
-# 4層マイクロサービス構成によるAI電子書籍変換基盤の構築方針
+🧱 AI PDF パイプライン：構築方針＋要件定義書（GTX 3060 最適化版 / 最終稿）
+1. 全体アーキテクチャ方針
+コード
+WebUI（設定管理・進捗表示）
+CLI（直接実行）
+↓
+Rust Core（PipelineRunner）
+↓
+AI Services（RealESRGAN / OCR）
+↓
+Data Layer（input/output/work）
+基本原則
+ホスト汚染ゼロ（すべて Docker）
 
-最終更新: 2026-04-20
+CLI と WebUI は同じ PipelineRunner を使用
 
-## 1. 目的
+I/O 最小化・WebP 採用・並列実行最適化 を最優先
 
-- ホスト汚染ゼロを維持する
-- 4層マイクロサービス構成を維持する
-  - Web UI
-  - Rust Core
-  - Upscale API
-  - OCR API
-- 大規模PDF処理時の安定性を優先する
+GTX 3060 12GB で安定動作するメモリ設計
 
-## 2. ディレクトリ構成
+AI サービスはモデルロードのみのウォームアップ（ダミー推論禁止）
 
-- web_ui/
-  - Nginxベースのフロントエンド
-- superbook-pdf/
-  - Rust Core
-- ai_services/realesrgan/
-  - 超解像 FastAPI
-- ai_services/yomitoku/
-  - OCR FastAPI
-- data/
-  - input, output, work の共有データ領域
+2. I/O 最小化方針（最重要）
+あなたのパイプラインの性能は I/O 最適化が最も支配的 です。
 
-## 3. コンテナ設計方針
+2.1 WebP（lossless）を標準フォーマットにする
+PNG → WebP（lossless）へ完全移行
 
-- docker-compose で4サービスを統合する
-- 依存関係は healthcheck ベースで連携する
-- Rust Core は環境変数で AI API URL を参照する
-  - REALESRGAN_API_URL
-  - YOMITOKU_API_URL
-- AIサービス間はゼロコピーでパス文字列を受け渡す
+理由：
 
-## 4. 実装済み要点
+読み書き高速（PNG の 2〜5 倍）
 
-- RealESRGAN, YomiToku の /version API 実装済み
-- Rust Core の HttpApiBridge 実装済み
-- 起動時ハンドシェイク (/version) 実装済み
-- AIサービスの workers は両方 1 で統一済み
-  - VRAM断片化と cleanup 片寄りの抑制
+ファイルサイズ 1/3〜1/5
 
-## 5. 継続検証結果 (2026-04-20)
+AI サービス側もそのまま読める
 
-- fix5v2 の5並行実行で全ジョブ成功 (RealESRGAN + YomiToku 直列化済み)
-  - EXIT: A=0 B=0 C=0 D=0 E=0
-  - 超解像失敗: 0件 (全5ジョブ)
-  - RealESRGAN cleanup: 4件 deferred (service busy) / 1件 freed (最後のジョブ)
-  - YomiToku cleanup: 5/5 freed
-  - Total time: a=125.72s / b=81.96s / c=215.90s / d=255.09s / e=170.52s
-- yosem2 の2並行実行で全ジョブ成功 (YomiTokuセマフォ導入後)
-  - EXIT_A=0 EXIT_B=0
-  - yosem2-a.log: 超解像失敗 0, Total time 119.28s
-  - yosem2-b.log: 超解像失敗 0, Total time 80.51s
-  - cleanup: RealESRGAN 200/202仕様動作, YomiToku cleanup成功
-- real2 の実ファイル2並行実行でも全ジョブ成功 (test10p.pdf)
-  - peak_concurrent=3
-  - EXIT_A=0 EXIT_B=0
-  - real2-a.log: RealESRGAN freed, YomiToku freed, Total time 983.03s
-  - real2-b.log: RealESRGAN deferred (service busy), YomiToku freed, Total time 941.54s
-  - 実ファイルでも cleanup 200/202 契約内で安定動作を確認
-- 全サービス healthy 維持を確認
+2.2 ページ単位ディレクトリ構造
+コード
+/data/work/0001/page.webp
+/data/work/0001/ocr.txt
+2.3 中間ファイルは「上書き方式」
+コード
+page.webp → page.webp → page.webp
+効果
+ファイル数が増えない
 
-## 6. 構築方針との差分整理
+I/O が最小化
 
-### 6.1 未実装点
+並列処理でも衝突しない
 
-- .devcontainer の実体ファイルが未作成
-- rust-core-dev 運用導線が未整備
+SSD の寿命にも優しい
 
-### 6.2 変更点
+3. 並列実行方針（GTX 3060 最適化）
+GTX 3060 12GB は メモリが潤沢ではないため、
+並列度は慎重に制御する必要があります。
 
-- RealESRGAN 側に GPU 直列化を導入
-  - asyncio.Semaphore(1) で /upscale を直列化
-- YomiToku 側に GPU 直列化を導入
-  - asyncio.Semaphore(1) で /ocr を直列化
-- Rust Core 側 HTTP timeout を 900秒へ拡張
-  - N並行時の待機キューを吸収
-- cleanup 202 (busy) を非致命扱いに変更
-- Post-GPU 遅延対策
-  - image::open ではなく image_dimensions を使用
+3.1 Rust Core 側で Semaphore による並列制御
+コード
+max_parallel_pages = 2〜4（推奨）
+3.2 AI サービス側のメモリ制御
+RealESRGAN:
 
-### 6.3 追記したほうが良い運用項目
+tile = 256（デフォルト）
 
-- GPU同時実行ポリシーを明文化
-  - RealESRGAN は必ず直列化
-  - YomiToku も必要に応じて同様に直列化
-- timeout 設計ルールの明文化
-  - 直列GPUキュー時は待機時間込みで設定
-- cleanup 応答契約の明文化
-  - 200 成功だけでなく 202 busy を正当応答とする
-- 本番反映手順の明文化
-  - 検証用途の docker cp と本番用途の build/recreate を分離
-- 受け入れ試験の定型化
-  - N=1,2,5 の exit, 失敗件数, cleanup, 所要時間, GPUメモリ確認
+batch = 1
 
-## 7. 運用ルール
+OCR:
 
-- 安定版反映は docker compose build と force-recreate を原則とする
-- 単発ホットパッチは検証目的に限定する
-- 性能改善は品質劣化がないことを前提に適用する
+並列数は Rust Core 側で制御
 
-## 8. 将来構想
+3.3 非同期 I/O（tokio）で GPU 待ち時間を隠蔽
+AI 呼び出しはすべて async
 
-- stable 確立までは GPU 系 AI サービスの直列化を維持する
-- 将来の性能改善候補として、OOM を回避しながら UPSCALE の実効スループットを上げる仕組みを検討する
-  - 単純な並行数引き上げは行わない
-  - 1ジョブあたりのピーク VRAM を下げたうえで段階的に検証する
-- 将来案の主方針は GPUワーカー + 動的 1〜2 本制御 とする
-  - CPU 側の前後処理は並列のまま進める
-  - GPU 実行直前で専用キューに集約する
-  - GPU ワーカーが画像サイズと VRAM 状況を見て 1 本または 2 本を許可する
-- 想定する将来案
-  - 画像サイズに応じて UPSCALE の並行許可本数を動的制御する
-  - tile_size を固定値ではなく GPU メモリ状況に応じて切り替える
-  - 小さい画像は 2 本並列、大きい画像は 1 本直列のような安全側制御を導入する
-  - 必要に応じて VRAM 使用量の観測値をもとに自動でフェイルバックする
-- 判定ロジック候補
-  - 入力値として、画像の width, height, 画素数, scale, tile_size, 直近の VRAM 使用量を参照する
-  - 第1段階では単純なルールベースで判定し、学習的な最適化は行わない
-  - 暫定ルール案
-    - 小サイズ画像: 画素数がしきい値以下なら 2 本並列を許可する
-    - 大サイズ画像: 画素数がしきい値超過なら 1 本直列へ落とす
-    - VRAM 高水位到達時: 新規 UPSCALE は 1 本へ制限し、tile_size も低メモリ側へ切り替える
-    - OOM または timeout 発生時: 同条件の後続ジョブは自動的に保守側設定へフォールバックする
-  - 保守側設定の候補
-    - 並行数 1
-    - tile_size 128 または 192
-    - timeout は待機時間込みで延長側を採用する
-  - 観測値の保持方針
-    - 実行ごとの入力画像サイズ、tile_size、処理時間、成否、OOM 有無を記録する
-    - 安全な組み合わせが確認できるまでは固定しきい値で運用する
-    - 実測が十分に蓄積した後にのみ、しきい値や並行許可本数を見直す
-- 前提条件
-  - N=1,2,5 の回帰で exit, cleanup, 所要時間, 失敗件数が安定していること
-  - 実ファイルを含む検証で OOM やタイムアウト再発がないこと
-  - 画像サイズ別に安全な tile_size と並行数の対応表を作成できること
-- この将来案は stable 化完了後に別フェーズで検討し、現時点では未実装とする
+I/O と GPU 推論を重ねて実行
 
-## 9. 次の実装優先度
+4. Rust Core（PipelineRunner）構築方針
+4.1 Stage trait（拡張可能）
+rust
+async fn run(&self, ctx: &mut PageContext) -> StageResult;
+fn name(&self) -> &'static str;
+4.2 PageContext（ページ単位の状態）
+最新 WebP のパス
 
-1. .devcontainer と rust-core-dev 導線整備
-2. 受け入れ試験スクリプト化 (N=1,2,5)
-3. YomiToku セマフォ導入後の N=5 再回帰を定期ジョブ化
+OCR テキストパス
+
+ステータス（pending/running/done/error）
+
+4.3 PipelineRunner
+ステージを Vec に積むだけで順番が決まる
+
+ページ単位で tokio::spawn
+
+Semaphore で並列度制御
+
+リトライ（指数バックオフ）を共通化
+
+5. AI サービス構築方針（GTX 3060 対応）
+5.1 ウォームアップは「モデルロードのみ」
+python
+@app.on_event("startup")
+def warmup():
+    global model
+    model = load_model()
+    torch.cuda.empty_cache()
+❌ ダミー推論は禁止
+→ GPU メモリを占有し続けるため
+
+5.2 推論後に torch.cuda.empty_cache() を呼ぶ
+→ 一時メモリを解放し OOM を防ぐ
+
+5.3 RealESRGAN API
+WebP 読み込み
+
+tile=256, batch=1（GTX 3060 最適）
+
+CUDA Stream は任意（メモリに余裕がある場合のみ）
+
+5.4 OCR API
+WebP 読み込み
+
+軽量モデル推奨（日本語対応）
+
+6. 設定管理（PipelineConfig）方針
+6.1 設定の優先順位
+inline_config（ジョブ単位）
+
+config_name（プリセット）
+
+pipeline.toml（デフォルト）
+
+6.2 設定 API（JSON ベース）
+/config/schema
+
+/config/current
+
+/config/save
+
+/config/load
+
+/config/history
+
+/config/restore
+
+/config/export
+
+/config/import
+
+6.3 スキーマ駆動 UI
+/config/schema に以下を含める：
+
+path
+
+type
+
+min/max/enum
+
+default
+
+description
+
+ui（slider/select/toggle）
+
+section
+
+order
+
+visible_if / readonly_if
+
+7. WebUI 構築方針
+7.1 画面構成
+設定編集画面（スキーマ駆動）
+
+プリセット管理画面
+
+PDF 処理画面（アップロード＋設定選択）
+
+進捗表示画面（SSE）
+
+7.2 SSE 契約
+イベント名：page_update
+
+データ：
+
+json
+{
+  "job_id": "...",
+  "page": 12,
+  "status": "running",
+  "stage": "upscale",
+  "updated_at": "ISO8601"
+}
+7.3 再接続
+SSE 再接続時は /api/jobs/{id} でスナップショット取得
+
+7.4 大量ページ時の UI
+仮想リスト or ページング必須（1000ページ対応）
+
+8. ジョブ管理方針
+8.1 ジョブ開始 API（正式）
+コード
+POST /api/convert
+入力（multipart）
+file（PDF）
+
+config_name
+
+inline_config（JSON）
+
+出力
+job_id
+
+status
+
+created_at
+
+total_pages
+
+effective_config_version
+
+8.2 再実行
+コード
+POST /api/jobs/{id}/retry
+
+9. セキュリティ・認証/認可
+9.1 認証
+APIキー方式（Bearer）
+
+複数キー発行可
+
+ローテーション可
+
+9.2 認可（RBAC）
+admin / editor / viewer
+
+API × ロール行列は前回定義の通り
+
+9.3 start-from-path（将来拡張）
+ホワイトリストディレクトリのみ許可
+
+realpath() でリンク対策
+
+10. 監査ログ
+timestamp(UTC)
+
+user_id
+
+role
+
+action
+
+target
+
+ip
+
+result
+
+error_code
+
+保持期間：90日
+改ざん耐性：append-only + HMAC（任意）
+
+11. 性能要件（GTX 3060 12GB 最適化）
+11.1 並列度
+コード
+max_parallel_pages = 2〜4
+11.2 RealESRGAN
+tile=256
+
+batch=1
+
+11.3 目標性能
+/api/convert → 1秒以内に job_id 返却
+
+300ページ PDF → 10〜20分（設定次第）
+
+同時ジョブ数：2（推奨）
+
+12. CLI と WebUI の一貫性
+両者とも PipelineRunner を呼び出す
+
+設定解決ロジックが共通
+
+同一入力＋同一設定 → 視覚的に同等の出力
+
+🎯 最終まとめ（短縮版）
+あなたのパイプラインの核は以下です：
+
+I/O 最小化（WebP + 上書き方式 + ページディレクトリ）
+
+GTX 3060 12GB に最適化された並列度とタイルサイズ
+
+AI サービスはモデルロードのみのウォームアップ
+
+PipelineRunner による統一的な処理フロー
+
+CLI / WebUI / API の完全一貫性
+
+スキーマ駆動 UI による柔軟な設定管理
+
+SSE によるリアルタイム進捗表示
+
+単ページ再実行・設定履歴・監査ログなどの運用性
+
+
+ーーーーーーーーーーーーーーーーーーーーーーーーーー
+🧱 並列化戦略（最大高速化の中核）— 詳細版
+GTX 3060（12GB）環境で 最大性能を引き出しつつ OOM を防ぐ ための正式仕様です。
+
+1. ページ単位で tokio::spawn（非同期タスク化）
+✔ 目的
+CPU / I/O / GPU の待ち時間を完全に隠蔽
+
+ページ単位で独立したパイプラインを動かす
+
+300ページなら 300タスクを生成しても問題ない（実行はセマフォで制御）
+
+✔ 実装方針
+rust
+for page_ctx in pages {
+    tokio::spawn(async move {
+        runner.run_page(page_ctx).await;
+    });
+}
+✔ 注意点
+“生成”は無制限で良い
+
+“実行”はセマフォで制御する（後述）
+
+2. AI サービス呼び出しは非同期 HTTP（GPU を遊ばせない）
+✔ 目的
+GPU が処理中でも Rust Core は待たない
+
+I/O や CPU ステージを重ねて実行できる
+
+GPU のアイドル時間をゼロに近づける
+
+✔ 実装方針
+rust
+let resp = client.post(url)
+    .json(&payload)
+    .send()
+    .await?;
+✔ 効果
+GPU が推論中でも Rust Core は他ページの処理を進める
+
+3060 のようなミドル GPU でも高いスループットを維持
+
+3. I/O は非同期（GPU処理と完全に重ねる）
+✔ 目的
+WebP 読み書きの待ち時間を GPU 推論と重ねる
+
+I/O がボトルネックにならないようにする
+
+✔ 実装方針
+tokio::fs::read
+
+tokio::fs::write
+
+tokio::task::spawn_blocking（ImageMagick / image crate の CPU処理）
+
+✔ 効果
+GPU が推論している間に次のページの I/O を完了
+
+全体処理時間が大幅に短縮
+
+4. セマフォで同時実行数を制御（GTX 3060 最適化の要）
+✔ 目的
+GPU メモリ（12GB）を超えないようにする
+
+RealESRGAN のタイルサイズ・モデルサイズに応じて調整
+
+I/O の暴走（300タスク同時に WebP 読み書き）を防ぐ
+
+✔ 実装方針
+rust
+let permit = semaphore.acquire().await?;
+runner.run_page(ctx).await;
+drop(permit);
+✔ 推奨値（GTX 3060 12GB）
+コード
+max_parallel_pages = 2〜4
+✔ 効果
+OOM（Out Of Memory）を完全に防ぐ
+
+GPU の最適利用（過負荷も低負荷も避ける）
+
+🧱 AI サービス側の最適化（GPU効率の最大化）— 詳細版
+GTX 3060 12GB で 安定・高速・安全 に動かすための正式仕様です。
+
+1. WebP 読み込み対応（I/O 最小化と GPU 前処理の高速化）
+✔ RealESRGAN
+python
+img = Image.open(path).convert("RGB")
+✔ OCR
+python
+img = cv2.imread(path, cv2.IMREAD_COLOR)
+✔ 効果
+PNG より高速
+
+ファイルサイズが小さいため I/O が軽い
+
+Rust Core とのデータ受け渡しが高速
+
+2. CUDA Stream による GPU 多重化
+✔ 目的
+GPU が 1枚でも複数推論を同時に実行できる
+
+RealESRGAN の推論時間を短縮
+
+✔ 実装方針
+python
+stream = torch.cuda.Stream()
+with torch.cuda.stream(stream):
+    output = model(img)
+✔ 注意点（3060 12GB）
+メモリが少ないため 並列度は 1〜2 が限界
+
+PipelineRunner のセマフォと連動させること
+
+3. FastAPI + Uvicorn workers（AI サービスの並列処理能力を最大化）
+✔ 目的
+CPU 前処理（WebP decode）を並列化
+
+GPU 推論を複数リクエストでキューイング
+
+✔ 推奨設定（3060）
+コード
+uvicorn app:app --workers 2
+✔ 効果
+GPU が 1つでも CPU 前処理が詰まらない
+
+リクエスト処理がスムーズになる
+
+4. /version API（Rust Core との互換性チェック）
+✔ 目的
+Rust Core が AI サービスのモデルバージョンを確認
+
+互換性のないモデルで処理しないようにする
+
+✔ 返却例
+json
+{
+  "model": "realesrgan-x4plus",
+  "torch_version": "2.1.0",
+  "cuda_version": "12.1"
+}
+5. GPU負荷ステータス API（インテリジェント負荷分散）
+✔ 目的
+Rust Core が「空いているレプリカ」を選択
+
+GPU メモリ不足を事前に回避
+
+大規模処理時の安定性向上
+
+✔ 返却例
+json
+{
+  "gpu_memory_total": 12288,
+  "gpu_memory_used": 4800,
+  "gpu_memory_free": 7488,
+  "active_requests": 1
+}
+✔ Rust Core の利用方法
+gpu_memory_free が最大のレプリカを選択
+
+active_requests が少ないレプリカを優先
+
+🧱 並列化 × I/O × GPU 最適化の統合動作（全体フロー）
+以下が 最適化されたパイプラインの実際の動作 です。
+
+1. Rust Core が 300ページ分のタスクを生成
+→ すべて tokio::spawn で非同期化
+→ 実行はセマフォで 2〜4 ページに制限（3060最適）
+
+2. 各ページタスクは以下を並列に行う
+① WebP 読み込み（非同期 I/O）
+→ CPU処理は spawn_blocking で並列化
+
+② AI サービスへ非同期 HTTP
+→ GPU が推論中でも Rust Core は待たない
+→ 他ページの I/O や CPU ステージを進める
+
+③ WebP 書き込み（非同期 I/O）
+→ GPU 推論と重ねて実行
+
+3. AI サービス側では
+① WebP decode（CPU）
+→ workers=2 で並列化
+
+② RealESRGAN 推論（GPU）
+→ tile=256, batch=1（3060最適）
+→ CUDA Stream により軽い多重化も可能
+
+③ 推論後に torch.cuda.empty_cache()
+→ メモリリーク防止
+
+4. Rust Core は SSE で進捗を WebUI に送信
+→ ページ単位でリアルタイム更新
+
+5. 全ページ完了後、最終 PDF を生成
+→ cleanup ステージで work ディレクトリ削除（任意）
+
+🎯 最終まとめ（短縮版）
+あなたのパイプラインの高速化と安定性は、以下の 3 本柱で成立します。
+
+① 並列化戦略（Rust Core）
+tokio::spawn でページ単位非同期化
+
+非同期 HTTP で GPU を遊ばせない
+
+非同期 I/O で GPU と重ねる
+
+セマフォで並列度を制御（3060最適：2〜4）
+
+② I/O 最適化
+WebP（lossless）採用
+
+ページディレクトリ
+
+上書き方式
+
+非同期 I/O
+
+③ AI サービス最適化
+WebP decode
+
+CUDA Stream
+
+workers=2
+
+モデルロードのみのウォームアップ
+
+推論後に empty_cache
+
+GPU負荷ステータス API で負荷分散
+
